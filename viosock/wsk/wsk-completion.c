@@ -58,6 +58,28 @@ WskGeneralIrpCompletion(
             memcpy(Irp->UserBuffer, Irp->AssociatedIrp.SystemBuffer, Irp->IoStatus.Information);
             opState = wsksFinished;
             break;
+        case wsksReceive:
+            if (Ctx->Mdl &&
+                Irp->IoStatus.Information == Ctx->Specific.Transfer.CurrentMdlSize)
+            {
+                Ctx->Specific.Transfer.CurrentMdlSize = Ctx->Mdl->Next != NULL ? MmGetMdlByteCount(Ctx->Mdl) : Ctx->Specific.Transfer.LastMdlSize;
+                Irp->IoStatus.Status = VioWskSocketBuildReadWriteSingleMdl(Ctx->Socket, Ctx->Mdl, 0, Ctx->Specific.Transfer.CurrentMdlSize, IRP_MJ_READ, &NextIrp);
+                if (!NT_SUCCESS(Irp->IoStatus.Status))
+                    break;
+
+                Ctx->Mdl = Ctx->Mdl->Next;
+                NextIrpStatus = CompContextSendIrp(Ctx, NextIrp);
+                if (!NT_SUCCESS(NextIrpStatus)) {
+                    Irp->IoStatus.Status = NextIrpStatus;
+                    Ctx->MasterIrp = NULL;
+                    VioWskIrpFree(NextIrp, DeviceObject, FALSE);
+                }
+			}
+            else opState = wsksFinished;
+
+            Ctx->IOSBInformation += Irp->IoStatus.Information;
+            Ctx->UseIOSBInformation = 1;
+            break;
         case wsksSend:
             if (Ctx->Mdl &&
 
