@@ -135,3 +135,60 @@ WskFreeMDLs(
     DEBUG_EXIT_FUNCTION_VOID();
     return;
 }
+
+
+NTSTATUS
+WskBufferValidate(
+    _In_ const WSK_BUF *Buffer,
+    _Out_ PULONG FirstMdlLength,
+    _Out_ PULONG LastMdlLength
+)
+{
+    PMDL mdl = NULL;
+    ULONG offset = 0;
+    SIZE_T length = 0;
+    ULONG mdlLength = 0;
+    NTSTATUS status = STATUS_UNSUCCESSFUL;
+    DEBUG_ENTER_FUNCTION("Buffer=0x%p; FirstMdlLength=0x%p; LastMdlLength=0x%p", Buffer, FirstMdlLength, LastMdlLength);
+
+    *FirstMdlLength = 0;
+    *LastMdlLength = 0;
+    status = STATUS_SUCCESS;
+    length = Buffer->Length;
+    offset = Buffer->Offset;
+    mdl = Buffer->Mdl;
+    if (mdl != NULL)
+    {
+        mdlLength = MmGetMdlByteCount(mdl);
+        if (offset <= mdlLength)
+        {
+            while (TRUE)
+            {
+                ULONG effectiveLength = mdlLength - offset;
+
+                if (length < effectiveLength)
+                    effectiveLength = (ULONG)length;
+
+                if (mdl == Buffer->Mdl)
+                    *FirstMdlLength = effectiveLength;
+                    
+                mdl = mdl->Next;
+                length -= effectiveLength;
+                if (length == 0 || mdl == NULL)
+                {
+                    *LastMdlLength = effectiveLength;
+                    break;
+                }
+
+                mdlLength = MmGetMdlByteCount(mdl);
+                offset = 0;
+            }
+        }
+        else status = STATUS_INVALID_PARAMETER;
+    }
+    else if (length != 0)
+        status = STATUS_INVALID_PARAMETER;
+
+    DEBUG_EXIT_FUNCTION("0x%x, *FirstMdlLength=%u, *LastMdlLength=%u", status, *FirstMdlLength, *LastMdlLength);
+    return status;
+}

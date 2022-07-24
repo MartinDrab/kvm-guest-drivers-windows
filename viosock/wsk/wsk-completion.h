@@ -59,9 +59,16 @@ typedef struct _VIOSOCKET_COMPLETION_CONTEXT {
     PIO_STATUS_BLOCK IoStatusBlock;
     PSIZE_T BytesReturned;
     PKEVENT Event;
-    ULONG_PTR IOSBInformation;
     PMDL Mdl;
+    ULONG_PTR IOSBInformation;
     int UseIOSBInformation : 1;
+    union {
+        struct {
+            const WSK_BUF *WskBuffer;
+            ULONG CurrentMdlSize;
+            ULONG LastMdlSize;
+        } Transfer;
+    } Specific;
 } VIOSOCKET_COMPLETION_CONTEXT, * PVIOSOCKET_COMPLETION_CONTEXT;
 
 

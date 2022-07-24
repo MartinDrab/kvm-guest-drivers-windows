@@ -43,6 +43,8 @@ WskGeneralIrpCompletion(
     _In_ PVOID          Context
 )
 {
+    PIRP NextIrp = NULL;
+    NTSTATUS NextIrpStatus = STATUS_UNSUCCESSFUL;
     EWSKState opState;
     PVIOSOCKET_COMPLETION_CONTEXT Ctx = (PVIOSOCKET_COMPLETION_CONTEXT)Context;
     DEBUG_ENTER_FUNCTION("DeviceObject=0x%p; Irp=0x%p; Context=0x%p", DeviceObject, Irp, Context);
@@ -55,6 +57,30 @@ WskGeneralIrpCompletion(
         case wsksReadIOCTL:
             memcpy(Irp->UserBuffer, Irp->AssociatedIrp.SystemBuffer, Irp->IoStatus.Information);
             opState = wsksFinished;
+            break;
+        case wsksSend:
+            if (Ctx->Mdl &&
+
+
+                (Irp->IoStatus.Information == Ctx->Specific.Transfer.CurrentMdlSize))
+             {
+                Ctx->Specific.Transfer.CurrentMdlSize = Ctx->Mdl->Next != NULL ? MmGetMdlByteCount(Ctx->Mdl) : Ctx->Specific.Transfer.LastMdlSize;
+                 Irp->IoStatus.Status = VioWskSocketBuildReadWriteSingleMdl(Ctx->Socket, Ctx->Mdl, 0, Ctx->Specific.Transfer.CurrentMdlSize, IRP_MJ_WRITE, &NextIrp);
+                 if (!NT_SUCCESS(Irp->IoStatus.Status))
+                     break;
+
+                Ctx->Mdl = Ctx->Mdl->Next;
+                NextIrpStatus = CompContextSendIrp(Ctx, NextIrp);
+                if (!NT_SUCCESS(NextIrpStatus)) {
+                    Irp->IoStatus.Status = NextIrpStatus;
+                    Ctx->MasterIrp = NULL;
+                    VioWskIrpFree(NextIrp, DeviceObject, FALSE);
+                }
+            }
+            else opState = wsksFinished;
+
+            Ctx->IOSBInformation += Irp->IoStatus.Information;
+            Ctx->UseIOSBInformation = 1;
             break;
         default:
             opState = wsksFinished;
@@ -83,21 +109,7 @@ WskGeneralIrpCompletion(
     }
 
     WskCompContextDereference(Ctx);
-    if (Irp->MdlAddress)
-    {
-        IoFreeMdl(Irp->MdlAddress);
-        Irp->MdlAddress = NULL;
-    }
-
-    if ((Irp->Flags & IRP_BUFFERED_IO) != 0 &&
-        (Irp->Flags & IRP_DEALLOCATE_BUFFER) != 0)
-    {
-        Irp->Flags &= ~(IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER);
-        ExFreePoolWithTag(Irp->AssociatedIrp.SystemBuffer, VIOSOCK_WSK_MEMORY_TAG);
-        Irp->AssociatedIrp.SystemBuffer = NULL;
-    }
-
-    IoFreeIrp(Irp);
+    VioWskIrpFree(Irp, DeviceObject, TRUE);
     
     DEBUG_EXIT_FUNCTION("0x%x", STATUS_MORE_PROCESSING_REQUIRED);
     return STATUS_MORE_PROCESSING_REQUIRED;
@@ -153,12 +165,8 @@ WskCompContextDereference(
 {
     DEBUG_ENTER_FUNCTION("CompContext=0x%p", CompContext);
 
-    if (InterlockedDecrement(&CompContext->ReferenceCount) == 0) {
-        if (CompContext->Mdl)
-            WskFreeMDLs(CompContext->Mdl);
-
+    if (InterlockedDecrement(&CompContext->ReferenceCount) == 0)
         ExFreePoolWithTag(CompContext, VIOSOCK_WSK_MEMORY_TAG);
-    }
 
     DEBUG_EXIT_FUNCTION_VOID();
     return;

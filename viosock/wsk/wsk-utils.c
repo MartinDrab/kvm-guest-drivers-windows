@@ -32,6 +32,7 @@
 #include "..\inc\debug-utils.h"
 #include "..\inc\vio_wsk.h"
 #include "viowsk-internal.h"
+#include "wsk-mdl.h"
 #include "wsk-completion.h"
 #include "wsk-utils.h"
 
@@ -106,6 +107,41 @@ VioWskIrpComplete(
 
     DEBUG_EXIT_FUNCTION("0x%x", Status);
     return Status;
+}
+
+
+void
+VioWskIrpFree(
+    _Inout_ PIRP            Irp,
+    _In_opt_ PDEVICE_OBJECT DeviceObject,
+    _In_ BOOLEAN            Completion
+)
+{
+    PDEVICE_OBJECT targetDevice = NULL;
+    DEBUG_ENTER_FUNCTION("Irp=0x%p; DeviceObject=0x%p; Completion=%u", Irp, DeviceObject, Completion);
+
+    targetDevice = (Completion) ? DeviceObject : IoGetNextIrpStackLocation(Irp)->DeviceObject;
+    if (Irp->MdlAddress)
+    {
+        if ((DeviceObject->Flags & DO_DIRECT_IO) == DO_DIRECT_IO)
+            MmUnlockPages(Irp->MdlAddress);
+
+        IoFreeMdl(Irp->MdlAddress);
+        Irp->MdlAddress = NULL;
+    }
+
+    if ((Irp->Flags & IRP_BUFFERED_IO) != 0 &&
+        (Irp->Flags & IRP_DEALLOCATE_BUFFER) != 0)
+    {
+        Irp->Flags &= ~(IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER);
+        ExFreePoolWithTag(Irp->AssociatedIrp.SystemBuffer, VIOSOCK_WSK_MEMORY_TAG);
+        Irp->AssociatedIrp.SystemBuffer = NULL;
+    }
+
+    IoFreeIrp(Irp);
+
+    DEBUG_EXIT_FUNCTION_VOID();
+    return;
 }
 
 
@@ -349,4 +385,119 @@ VioWskSocketBuildIOCTL(
 Exit:
 	DEBUG_EXIT_FUNCTION("0x%x, *Irp=0x%p", Status, *Irp);
 	return Status;
+}
+
+
+_Must_inspect_result_
+NTSTATUS
+VioWskSocketReadWrite(
+    _In_ PVIOWSK_SOCKET Socket,
+    const WSK_BUF      *Buffers,
+    _In_ UCHAR          MajorFunction,
+    _Inout_ PIRP        Irp
+)
+{
+    PIRP OpIrp = NULL;
+    ULONG firstMdlLength = 0;
+    ULONG lastMdlLength = 0;
+    EWSKState state = wsksUndefined;
+    PVIOWSK_REG_CONTEXT pContext = NULL;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PWSK_REGISTRATION Registraction = NULL;
+    PVIOSOCKET_COMPLETION_CONTEXT CompContext = NULL;
+	DEBUG_ENTER_FUNCTION("Sockect=0x%p; Buffers=0x%p; MajorFunction=%u; Irp=0x%p", Socket, Buffers, MajorFunction, Irp);
+
+    Registraction = (PWSK_REGISTRATION)Socket->Client;
+    pContext = (PVIOWSK_REG_CONTEXT)Registraction->ReservedRegistrationContext;
+    Status = WskBufferValidate(Buffers, &firstMdlLength, &lastMdlLength);
+    if (!NT_SUCCESS(Status))
+        goto CompleteParentIrp;
+
+    switch (MajorFunction)
+    {
+    case IRP_MJ_READ:
+        state = wsksReceive;
+        break;
+    case IRP_MJ_WRITE:
+        state = wsksSend;
+        break;
+    default:
+        Status = STATUS_INVALID_PARAMETER_3;
+        goto CompleteParentIrp;
+        break;
+    }
+
+    Status = VioWskSocketBuildReadWriteSingleMdl(Socket, Buffers->Mdl, Buffers->Offset, firstMdlLength, MajorFunction, &OpIrp);
+    if (!NT_SUCCESS(Status))
+        goto CompleteParentIrp;
+
+    CompContext = WskCompContextAlloc(state, Socket, Irp, NULL, Buffers->Mdl->Next);
+    if (!CompContext)
+        goto FreeOpIrp;
+
+    CompContext->Specific.Transfer.CurrentMdlSize = firstMdlLength;
+    CompContext->Specific.Transfer.LastMdlSize = lastMdlLength;
+    CompContext->Specific.Transfer.WskBuffer = Buffers;
+    Status = CompContextSendIrp(CompContext, OpIrp);
+    WskCompContextDereference(CompContext);
+    if (NT_SUCCESS(Status))
+        OpIrp = NULL;
+        
+    Irp = NULL;
+
+FreeOpIrp:
+    if (OpIrp)
+        VioWskIrpFree(OpIrp, NULL, FALSE);
+CompleteParentIrp:
+    if (Irp)
+        VioWskIrpComplete(Socket, Irp, Status, 0);
+
+    DEBUG_EXIT_FUNCTION("0x%x", Status);
+    return Status;
+}
+
+
+_Must_inspect_result_
+NTSTATUS
+VioWskSocketBuildReadWriteSingleMdl(
+    _In_ PVIOWSK_SOCKET Socket,
+    _In_ PMDL           Mdl,
+    _In_ ULONG          Offset,
+    _In_ ULONG          Length,
+    _In_ UCHAR          MajorFunction,
+    _Out_ PIRP         *Irp
+)
+{
+    PIRP OpIrp = NULL;
+    PVOID mdlBuffer = NULL;
+    PIO_STACK_LOCATION IrpStack = NULL;
+    PVIOWSK_REG_CONTEXT pContext = NULL;
+    PWSK_REGISTRATION Registraction = NULL;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; Mdl=0x%p; MajorFunction=%u; Offset=%u; Length=%u; Irp=0x%p", Socket, Mdl, Offset, Length, MajorFunction, Irp);
+
+    Registraction = (PWSK_REGISTRATION)Socket->Client;
+    pContext = (PVIOWSK_REG_CONTEXT)Registraction->ReservedRegistrationContext;
+    mdlBuffer = MmGetSystemAddressForMdlSafe(Mdl, NormalPagePriority);
+    if (!mdlBuffer)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+
+    OpIrp = IoBuildAsynchronousFsdRequest(MajorFunction, pContext->VIOSockDevice, (PUCHAR)mdlBuffer + Offset, Length, NULL, NULL);
+    if (!OpIrp)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+
+    IrpStack = IoGetNextIrpStackLocation(OpIrp);
+    IrpStack->FileObject = Socket->FileObject;
+    *Irp = OpIrp;
+    Status = STATUS_SUCCESS;
+
+Exit:
+    DEBUG_EXIT_FUNCTION("0x%x, *Irp=0x%p", Status, *Irp);
+    return STATUS_SUCCESS;
 }

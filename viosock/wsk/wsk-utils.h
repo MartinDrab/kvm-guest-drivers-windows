@@ -60,6 +60,13 @@ VioWskIrpComplete(
     _In_ ULONG_PTR             Information
 );
 
+void
+VioWskIrpFree(
+    _Inout_ PIRP            Irp,
+    _In_opt_ PDEVICE_OBJECT DeviceObject,
+    _In_ BOOLEAN            Completion
+);
+
 _Must_inspect_result_
 NTSTATUS
 VioWskAddressPartToString(
@@ -96,6 +103,28 @@ VioWskSocketBuildIOCTL(
     _In_ ULONG          InputBufferLength,
     _In_opt_ PVOID      OutputBuffer,
     _In_ ULONG          OutputBufferLength,
+    _Out_ PIRP*         Irp
+);
+
+
+_Must_inspect_result_
+NTSTATUS
+VioWskSocketReadWrite(
+    _In_ PVIOWSK_SOCKET Socket,
+    const WSK_BUF      *Buffers,
+    _In_ UCHAR          MajorFunction,
+    _Inout_ PIRP        Irp
+);
+
+
+_Must_inspect_result_
+NTSTATUS
+VioWskSocketBuildReadWriteSingleMdl(
+    _In_ PVIOWSK_SOCKET Socket,
+    _In_ PMDL           Mdl,
+    _In_ ULONG          Offset,
+    _In_ ULONG          Length,
+    _In_ UCHAR          MajorFunction,
     _Out_ PIRP*         Irp
 );
 

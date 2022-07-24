@@ -49,5 +49,13 @@ WskFreeMDLs(
 );
 
 
+NTSTATUS
+WskBufferValidate(
+    _In_ const WSK_BUF* Buffer,
+    _Out_ PULONG FirstMdlLength,
+    _Out_ PULONG LastMdlLength
+);
+
+
 
 #endif
