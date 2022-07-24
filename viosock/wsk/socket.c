@@ -572,10 +572,21 @@ VioWskRelease(
     _In_ PWSK_DATA_INDICATION DataIndication
 )
 {
-    UNREFERENCED_PARAMETER(Socket);
-    UNREFERENCED_PARAMETER(DataIndication);
+    PWSK_DATA_INDICATION Prev = NULL;
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; DataIndication=0x%p", Socket, DataIndication);
 
-    return STATUS_NOT_IMPLEMENTED;
+    UNREFERENCED_PARAMETER(Socket);
+
+    do {
+        Prev = DataIndication;
+        DataIndication = DataIndication->Next;
+        MmUnlockPages(Prev->Buffer.Mdl);
+        IoFreeMdl(Prev->Buffer.Mdl);
+        ExFreePoolWithTag(Prev, VIOSOCK_WSK_MEMORY_TAG);
+    } while (DataIndication != NULL);
+
+    DEBUG_EXIT_FUNCTION("0x%x", STATUS_SUCCESS);
+    return STATUS_SUCCESS;
 }
 
 NTSTATUS
