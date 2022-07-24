@@ -32,6 +32,7 @@
 #include "viowsk.h"
 #include "wsk-utils.h"
 #include "viowsk-internal.h"
+#include "wsk-completion.h"
 #include "wsk-workitem.h"
 #include "..\inc\vio_wsk.h"
 
@@ -385,10 +386,46 @@ VioWskGetLocalAddress(
     _Inout_ PIRP     Irp
 )
 {
-    UNREFERENCED_PARAMETER(Socket);
-    UNREFERENCED_PARAMETER(LocalAddress);
+    PIRP IOCTLIrp = NULL;
+    PVIOSOCKET_COMPLETION_CONTEXT CompContext = NULL;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PVIOWSK_SOCKET pSocket = CONTAINING_RECORD(Socket, VIOWSK_SOCKET, WskSocket);
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; LocalAddress=0x%p; Irp=0x%p", Socket, LocalAddress, Irp);
 
-    return VioWskCompleteIrp(Irp, STATUS_NOT_IMPLEMENTED, 0);
+    Status = VioWskIrpAcquire(pSocket, Irp);
+    if (!NT_SUCCESS(Status))
+    {
+        pSocket = NULL;
+        goto CompleteIrp;
+    }
+
+    Status = VioWskSocketBuildIOCTL(pSocket, IOCTL_SOCKET_GET_SOCK_NAME, NULL, 0, LocalAddress, sizeof(SOCKADDR_VM), &IOCTLIrp);
+    if (!NT_SUCCESS(Status))
+        goto CompleteIrp;
+
+    CompContext = WskCompContextAlloc(wsksReadIOCTL, pSocket, Irp, NULL, NULL);
+    if (!CompContext)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto FreeOpIrp;
+    }
+
+    Status = CompContextSendIrp(CompContext, IOCTLIrp);
+    WskCompContextDereference(CompContext);
+    if (NT_SUCCESS(Status))
+        IOCTLIrp = NULL;
+
+    Irp = NULL;
+
+FreeOpIrp:
+    if (IOCTLIrp)
+        IoFreeIrp(IOCTLIrp);
+CompleteIrp:
+    if (Irp)
+        VioWskIrpComplete(pSocket, Irp, Status, 0);
+
+    DEBUG_EXIT_FUNCTION("0x%x", Status);
+    return Status;
 }
 
 NTSTATUS

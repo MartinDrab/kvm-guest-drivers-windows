@@ -38,6 +38,7 @@
 
 typedef enum _EWSKState {
     wsksUndefined,
+    wsksReadIOCTL,
     wsksBind,
     wsksListen,
     wsksConnectEx,

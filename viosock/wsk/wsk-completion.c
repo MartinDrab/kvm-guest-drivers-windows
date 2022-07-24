@@ -51,6 +51,10 @@ WskGeneralIrpCompletion(
     if (NT_SUCCESS(Irp->IoStatus.Status)) {
         switch (opState)
         {
+        case wsksReadIOCTL:
+            memcpy(Irp->UserBuffer, Irp->AssociatedIrp.SystemBuffer, Irp->IoStatus.Information);
+            opState = wsksFinished;
+            break;
         default:
             opState = wsksFinished;
             break;
