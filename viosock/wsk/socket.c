@@ -934,12 +934,64 @@ VioWskConnectEx(
     _Inout_ PIRP      Irp
 )
 {
-    UNREFERENCED_PARAMETER(Socket);
-    UNREFERENCED_PARAMETER(RemoteAddress);
-    UNREFERENCED_PARAMETER(Buffer);
+    PIRP ConnIrp = NULL;
+    PMDL MDLList = NULL;
+    SOCKADDR_VM VMRemoteAddr;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PVIOSOCKET_COMPLETION_CONTEXT CompContext = NULL;
+    PVIOWSK_SOCKET pSocket = CONTAINING_RECORD(Socket, VIOWSK_SOCKET, WskSocket);
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; RemoteAddress=0x%p; Buffer=0x%p; Flags=0x%x; Irp=0x%p", Socket, RemoteAddress, Buffer, Flags, Irp);
+
     UNREFERENCED_PARAMETER(Flags);
 
-    return VioWskCompleteIrp(Irp, STATUS_NOT_IMPLEMENTED, 0);
+    VMRemoteAddr = *(PSOCKADDR_VM)RemoteAddress;
+    if (VMRemoteAddr.svm_cid == VMADDR_CID_ANY)
+        VMRemoteAddr.svm_cid = pSocket->GuestId;
+
+    Status = VioWskIrpAcquire(pSocket, Irp);
+    if (!NT_SUCCESS(Status))
+    {
+        pSocket = NULL;
+        goto CompleteIrp;
+    }
+
+    Status = VioWskSocketBuildIOCTL(pSocket, IOCTL_SOCKET_CONNECT, &VMRemoteAddr, sizeof(VMRemoteAddr), NULL, 0, &ConnIrp);
+    if (!NT_SUCCESS(Status))
+        goto CompleteIrp;
+
+    if (Buffer && Buffer->Length > 0)
+    {
+        Status = WskBufToMDLs(Buffer, IoReadAccess, &MDLList);
+        if (!NT_SUCCESS(Status))
+            goto FreeConnIrp;
+    }
+
+    CompContext = WskCompContextAlloc(wsksConnectEx, pSocket, Irp, NULL, MDLList);
+    if (!CompContext) {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto FreeMDLList;
+	}
+
+    Status = CompContextSendIrp(CompContext, ConnIrp);
+    WskCompContextDereference(CompContext);
+    if (NT_SUCCESS(Status))
+        ConnIrp = NULL;
+    
+    Irp = NULL;
+    MDLList = NULL;
+
+FreeMDLList:
+    if (MDLList)
+      WskFreeMDLs(MDLList);
+FreeConnIrp:
+	if (ConnIrp)
+		IoFreeIrp(ConnIrp);
+CompleteIrp:
+    if (Irp)
+        VioWskIrpComplete(pSocket, Irp, Status, 0);
+
+    DEBUG_EXIT_FUNCTION("0x%x", Status);
+    return Status;
 }
 
 NTSTATUS

@@ -139,17 +139,17 @@ WskGeneralIrpCompletion(
             Ctx->UseIOSBInformation = 1;
             break;
         case wsksSend:
+        case wsksConnectEx:
         case wsksDisconnect:
             if (Ctx->Mdl &&
-
-
-                (Irp->IoStatus.Information == Ctx->Specific.Transfer.CurrentMdlSize))
+                (opState == wsksConnectEx || Irp->IoStatus.Information == Ctx->Specific.Transfer.CurrentMdlSize))
              {
                 Ctx->Specific.Transfer.CurrentMdlSize = Ctx->Mdl->Next != NULL ? MmGetMdlByteCount(Ctx->Mdl) : Ctx->Specific.Transfer.LastMdlSize;
                  Irp->IoStatus.Status = VioWskSocketBuildReadWriteSingleMdl(Ctx->Socket, Ctx->Mdl, 0, Ctx->Specific.Transfer.CurrentMdlSize, IRP_MJ_WRITE, &NextIrp);
                  if (!NT_SUCCESS(Irp->IoStatus.Status))
                      break;
 
+                Ctx->State = wsksSend;
                 Ctx->Mdl = Ctx->Mdl->Next;
                 NextIrpStatus = CompContextSendIrp(Ctx, NextIrp);
                 if (!NT_SUCCESS(NextIrpStatus)) {
