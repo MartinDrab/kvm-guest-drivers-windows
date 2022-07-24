@@ -32,6 +32,7 @@
 #include "..\inc\debug-utils.h"
 #include "..\inc\vio_wsk.h"
 #include "viowsk-internal.h"
+#include "wsk-completion.h"
 #include "wsk-utils.h"
 
 #ifdef ALLOC_PRAGMA
@@ -160,4 +161,192 @@ VioWskStringToAddressPart(
 Exit:
     DEBUG_EXIT_FUNCTION("0x%x, *Value=%u", Status, *Value);
     return Status;
+}
+
+
+
+_Must_inspect_result_
+NTSTATUS
+VioWskSocketIOCTL(
+    _In_ PVIOWSK_SOCKET        Socket,
+    _In_ ULONG                 ControlCode,
+    _In_opt_ PVOID             InputBuffer,
+    _In_ ULONG                 InputBufferLength,
+    _Out_opt_ PVOID            OutputBuffer,
+    _In_ ULONG                 OutputBufferLength,
+    _Inout_opt_ PIRP           Irp,
+    _Out_opt_ PIO_STATUS_BLOCK IoStatusBlock
+)
+{
+	PIRP IOCTLIrp = NULL;
+	PVIOWSK_REG_CONTEXT pContext = NULL;
+	PWSK_REGISTRATION Registraction = NULL;
+	NTSTATUS Status = STATUS_UNSUCCESSFUL;
+	PVIOSOCKET_COMPLETION_CONTEXT CompContext = NULL;
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; ControlCode=0x%x; InputBuffer=0x%p; InputBufferLength=%u; OutputBuffer=0x%p; OutputBufferLength=%u; Irp=0x%p; IoStatusBLock=0x%p", Socket, ControlCode, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength, Irp, IoStatusBlock);
+
+    Registraction = (PWSK_REGISTRATION)Socket->Client;
+    pContext = (PVIOWSK_REG_CONTEXT)Registraction->ReservedRegistrationContext;
+    Status = VioWskSocketBuildIOCTL(Socket, ControlCode, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength, &IOCTLIrp);
+    if (!NT_SUCCESS(Status))
+        goto Complete;
+
+    CompContext = WskCompContextAlloc(wsksFinished, Socket, Irp, IoStatusBlock, NULL);
+    if (CompContext == NULL)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto FreeIOCTL;
+	}
+
+	Status = CompContextSendIrp(CompContext, IOCTLIrp);
+    WskCompContextDereference(CompContext);
+    if (NT_SUCCESS(Status))
+        IOCTLIrp = NULL;
+
+    Irp = NULL;
+
+FreeIOCTL:
+    if (IOCTLIrp)
+        IoFreeIrp(IOCTLIrp);
+Complete:
+    if (Irp)
+        VioWskIrpComplete(Socket, Irp, Status, 0);
+
+	DEBUG_EXIT_FUNCTION("0x%x", Status);
+	return Status;
+}
+
+
+_Must_inspect_result_
+NTSTATUS
+VioWskSocketBuildIOCTL(
+    _In_ PVIOWSK_SOCKET  Socket,
+    _In_ ULONG           ControlCode,
+    _In_opt_ PVOID       InputBuffer,
+    _In_ ULONG           InputBufferLength,
+    _In_opt_ PVOID       OutputBuffer,
+    _In_ ULONG           OutputBufferLength,
+    _Out_ PIRP          *Irp
+)
+{
+    PIRP IOCTLIrp = NULL;
+    ULONG method = 0;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PIO_STACK_LOCATION IrpStack = NULL;
+    PVIOWSK_REG_CONTEXT pContext = NULL;
+    PWSK_REGISTRATION Registraction = NULL;
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; ControlCode=0x%x; InputBuffer=0x%p; InputBufferLength=%u; OutputBuffer=0x%p; OutputBufferLength=%u; Irp=0x%p", Socket, ControlCode, InputBuffer, InputBufferLength, OutputBuffer, OutputBufferLength, Irp);
+
+    Status = STATUS_SUCCESS;
+    Registraction = (PWSK_REGISTRATION)Socket->Client;
+    pContext = (PVIOWSK_REG_CONTEXT)Registraction->ReservedRegistrationContext;
+    IOCTLIrp = IoAllocateIrp(pContext->VIOSockDevice->StackSize, FALSE);
+    if (!IOCTLIrp)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto Exit;
+    }
+
+    IrpStack = IoGetNextIrpStackLocation(IOCTLIrp);
+    IrpStack->MajorFunction = IRP_MJ_DEVICE_CONTROL;
+    IrpStack->DeviceObject = pContext->VIOSockDevice;
+    IrpStack->FileObject = Socket->FileObject;
+    IrpStack->Parameters.DeviceIoControl.InputBufferLength = InputBufferLength;
+    IrpStack->Parameters.DeviceIoControl.OutputBufferLength = OutputBufferLength;
+    IrpStack->Parameters.DeviceIoControl.IoControlCode = ControlCode;
+    method = ControlCode & 3;
+    switch (method)
+    {
+    case METHOD_BUFFERED:
+        if (InputBufferLength != 0 || OutputBufferLength != 0)
+        {
+            IOCTLIrp->AssociatedIrp.SystemBuffer = ExAllocatePoolWithTag(
+                NonPagedPool, 
+                InputBufferLength > OutputBufferLength ? InputBufferLength : OutputBufferLength,
+                VIOSOCK_WSK_MEMORY_TAG);
+
+            if (IOCTLIrp->AssociatedIrp.SystemBuffer)
+            {
+                if (InputBuffer)
+                    memcpy(IOCTLIrp->AssociatedIrp.SystemBuffer, InputBuffer, InputBufferLength);
+
+                IOCTLIrp->Flags = IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER;
+                IOCTLIrp->UserBuffer = OutputBuffer;
+                if (OutputBuffer)
+                    IOCTLIrp->Flags |= IRP_INPUT_OPERATION;
+            }
+            else Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else {
+            IOCTLIrp->Flags = 0;
+            IOCTLIrp->UserBuffer = NULL;
+        }
+        break;
+    case METHOD_IN_DIRECT:
+    case METHOD_OUT_DIRECT:
+        if (InputBuffer)
+        {
+            IOCTLIrp->AssociatedIrp.SystemBuffer = ExAllocatePoolWithTag(
+                NonPagedPool,
+                InputBufferLength,
+                VIOSOCK_WSK_MEMORY_TAG);
+
+            if (IOCTLIrp->AssociatedIrp.SystemBuffer)
+            {
+                memcpy(IOCTLIrp->AssociatedIrp.SystemBuffer, InputBuffer, InputBufferLength);
+                IOCTLIrp->Flags = IRP_BUFFERED_IO | IRP_DEALLOCATE_BUFFER;
+            }
+            else Status = STATUS_INSUFFICIENT_RESOURCES;
+        }
+        else IOCTLIrp->Flags = 0;
+
+        if (NT_SUCCESS(Status) && OutputBuffer) {
+            IOCTLIrp->MdlAddress = IoAllocateMdl(
+                OutputBuffer,
+                OutputBufferLength,
+                FALSE,
+                FALSE,
+                NULL);
+
+            if (!IOCTLIrp->MdlAddress)
+            {
+                if (InputBuffer)
+                    ExFreePoolWithTag(IOCTLIrp->AssociatedIrp.SystemBuffer, VIOSOCK_WSK_MEMORY_TAG);
+
+                Status = STATUS_INSUFFICIENT_RESOURCES;
+            }
+
+            if (NT_SUCCESS(Status)) {
+                __try
+                {
+                    MmProbeAndLockPages(IOCTLIrp->MdlAddress, KernelMode, (LOCK_OPERATION)((method == METHOD_IN_DIRECT) ? IoReadAccess : IoWriteAccess));
+                }
+                __except (EXCEPTION_EXECUTE_HANDLER) {
+                    if (IOCTLIrp->MdlAddress)
+                        IoFreeMdl(IOCTLIrp->MdlAddress);
+
+                    if (InputBuffer)
+                        ExFreePoolWithTag(IOCTLIrp->AssociatedIrp.SystemBuffer, VIOSOCK_WSK_MEMORY_TAG);
+
+                    Status = GetExceptionCode();
+                }
+            }
+        }
+        break;
+    case METHOD_NEITHER:
+        IOCTLIrp->UserBuffer = OutputBuffer;
+        IrpStack->Parameters.DeviceIoControl.Type3InputBuffer = InputBuffer;
+        break;
+	}
+
+    if (NT_SUCCESS(Status)) {
+        *Irp = IOCTLIrp;
+        IOCTLIrp = NULL;
+    }
+
+    if (IOCTLIrp)
+        IoFreeIrp(IOCTLIrp);
+Exit:
+	DEBUG_EXIT_FUNCTION("0x%x, *Irp=0x%p", Status, *Irp);
+	return Status;
 }
