@@ -1043,7 +1043,25 @@ VioWskListen(
     _Inout_ PIRP     Irp
 )
 {
-    UNREFERENCED_PARAMETER(Socket);
+    ULONG Backlog = 128;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PVIOWSK_SOCKET pSocket = CONTAINING_RECORD(Socket, VIOWSK_SOCKET, WskSocket);
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; Irp=0x%p", Socket, Irp);
 
-    return VioWskCompleteIrp(Irp, STATUS_NOT_IMPLEMENTED, 0);
+    Status = VioWskIrpAcquire(pSocket, Irp);
+    if (!NT_SUCCESS(Status))
+    {
+        pSocket = NULL;
+        goto CompleteIrp;
+    }
+
+    Status = VioWskSocketIOCTL(pSocket, IOCTL_SOCKET_LISTEN, &Backlog, sizeof(Backlog), NULL, 0, Irp, NULL);
+    Irp = NULL;
+
+CompleteIrp:
+    if (Irp)
+        VioWskIrpComplete(pSocket, Irp, Status, 0);
+
+    DEBUG_EXIT_FUNCTION("0x%x", Status);
+    return Status;
 }
