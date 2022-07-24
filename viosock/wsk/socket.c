@@ -34,6 +34,7 @@
 #include "viowsk-internal.h"
 #include "wsk-completion.h"
 #include "wsk-workitem.h"
+#include "wsk-mdl.h"
 #include "..\inc\vio_wsk.h"
 
 NTSTATUS
@@ -682,8 +683,7 @@ VioWskRelease(
     do {
         Prev = DataIndication;
         DataIndication = DataIndication->Next;
-        MmUnlockPages(Prev->Buffer.Mdl);
-        IoFreeMdl(Prev->Buffer.Mdl);
+        WskFreeMDLs(Prev->Buffer.Mdl);
         ExFreePoolWithTag(Prev, VIOSOCK_WSK_MEMORY_TAG);
     } while (DataIndication != NULL);
 

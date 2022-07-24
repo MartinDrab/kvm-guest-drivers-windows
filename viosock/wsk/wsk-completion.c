@@ -31,6 +31,7 @@
 #include "..\inc\debug-utils.h"
 #include "wsk-utils.h"
 #include "viowsk-internal.h"
+#include "wsk-mdl.h"
 #include "wsk-completion.h"
 
 
@@ -154,7 +155,7 @@ WskCompContextDereference(
 
     if (InterlockedDecrement(&CompContext->ReferenceCount) == 0) {
         if (CompContext->Mdl)
-            IoFreeMdl(CompContext->Mdl);
+            WskFreeMDLs(CompContext->Mdl);
 
         ExFreePoolWithTag(CompContext, VIOSOCK_WSK_MEMORY_TAG);
     }

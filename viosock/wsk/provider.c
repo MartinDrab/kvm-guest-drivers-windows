@@ -33,6 +33,7 @@
 #include "wsk-utils.h"
 #include "viowsk-internal.h"
 #include "wsk-workitem.h"
+#include "wsk-mdl.h"
 #include "..\inc\vio_wsk.h"
 
 #ifdef ALLOC_PRAGMA
