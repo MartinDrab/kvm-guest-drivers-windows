@@ -39,16 +39,16 @@
 NTSTATUS
 WSKAPI
 VioWskControlSocket(
-    _In_ PWSK_SOCKET                    Socket,
-    _In_ WSK_CONTROL_SOCKET_TYPE        RequestType,
-    _In_ ULONG                          ControlCode,
-    _In_ ULONG                          Level,
-    _In_ SIZE_T                         InputSize,
+    _In_ PWSK_SOCKET                         Socket,
+    _In_ WSK_CONTROL_SOCKET_TYPE             RequestType,
+    _In_ ULONG                               ControlCode,
+    _In_ ULONG                               Level,
+    _In_ SIZE_T                              InputSize,
     _In_reads_bytes_opt_(InputSize) PVOID    InputBuffer,
-    _In_ SIZE_T                         OutputSize,
-    _Out_writes_bytes_opt_(OutputSize) PVOID  OutputBuffer,
-    _Out_opt_ SIZE_T                   *OutputSizeReturned,
-    _Inout_opt_ PIRP                    Irp
+    _In_ SIZE_T                              OutputSize,
+    _Out_writes_bytes_opt_(OutputSize) PVOID OutputBuffer,
+    _Out_opt_ SIZE_T                        *OutputSizeReturned,
+    _Inout_opt_ PIRP                         Irp
 );
 
 NTSTATUS
@@ -253,29 +253,131 @@ WSK_PROVIDER_STREAM_DISPATCH gStreamDispatch =
 NTSTATUS
 WSKAPI
 VioWskControlSocket(
-    _In_ PWSK_SOCKET                    Socket,
-    _In_ WSK_CONTROL_SOCKET_TYPE        RequestType,
-    _In_ ULONG                          ControlCode,
-    _In_ ULONG                          Level,
-    _In_ SIZE_T                         InputSize,
-    _In_reads_bytes_opt_(InputSize) PVOID    InputBuffer,
-    _In_ SIZE_T                         OutputSize,
+    _In_ PWSK_SOCKET                          Socket,
+    _In_ WSK_CONTROL_SOCKET_TYPE              RequestType,
+    _In_ ULONG                                ControlCode,
+    _In_ ULONG                                Level,
+    _In_ SIZE_T                               InputSize,
+    _In_reads_bytes_opt_(InputSize) PVOID     InputBuffer,
+    _In_ SIZE_T                               OutputSize,
     _Out_writes_bytes_opt_(OutputSize) PVOID  OutputBuffer,
-    _Out_opt_ SIZE_T                   *OutputSizeReturned,
-    _Inout_opt_ PIRP                    Irp
+    _Out_opt_ SIZE_T                         *OutputSizeReturned,
+    _Inout_opt_ PIRP                          Irp
 )
 {
-    UNREFERENCED_PARAMETER(Socket);
-    UNREFERENCED_PARAMETER(RequestType);
-    UNREFERENCED_PARAMETER(ControlCode);
-    UNREFERENCED_PARAMETER(Level);
-    UNREFERENCED_PARAMETER(InputSize);
-    UNREFERENCED_PARAMETER(InputBuffer);
-    UNREFERENCED_PARAMETER(OutputSize);
-    UNREFERENCED_PARAMETER(OutputBuffer);
+    PIRP IOCTLIrp = NULL;
+    PVIOSOCKET_COMPLETION_CONTEXT CompContext = NULL;
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PKEVENT pEvent = NULL;
+    KEVENT Event;
+    PIO_STATUS_BLOCK pIoStatusBlock = NULL;
+    IO_STATUS_BLOCK IoStatusBlock = { 0 };
+    PVIOWSK_SOCKET pSocket = CONTAINING_RECORD(Socket, VIOWSK_SOCKET, WskSocket);
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; RequestType=%u; ControlCode=0x%x; Level=%u; InputSize=%zu; InputBuffer=0x%p; OutputSize=%zu; OutputBuffer=0x%p; OutputSizeReturned=0x%p; Irp=0x%p", Socket, RequestType, ControlCode, Level, InputSize, InputBuffer, OutputSize, OutputBuffer, OutputSizeReturned, Irp);
+
     UNREFERENCED_PARAMETER(OutputSizeReturned);
 
-    return VioWskCompleteIrp(Irp, STATUS_NOT_IMPLEMENTED, 0);
+    if (!Irp)
+    {
+        Irp = IoAllocateIrp(1, FALSE);
+        if (!Irp)
+        {
+            Status = STATUS_INSUFFICIENT_RESOURCES;
+            goto Exit;
+        }
+
+        KeInitializeEvent(&Event, NotificationEvent, FALSE);
+        pEvent = &Event;
+        pIoStatusBlock = &IoStatusBlock;
+    }
+
+    Status = VioWskIrpAcquire(pSocket, Irp);
+    if (!NT_SUCCESS(Status))
+    {
+        pSocket = NULL;
+        if (pEvent)
+            IoSetNextIrpStackLocation(Irp);
+
+        goto CompleteIrp;
+    }
+
+    switch (RequestType)
+    {
+    case WskSetOption:
+    case WskGetOption: {
+        ULONG ioctl = 0;
+        VIRTIO_VSOCK_OPT Opt;
+
+        memset(&Opt, 0, sizeof(Opt));
+        Opt.level = Level;
+        Opt.optname = ControlCode;
+        switch (RequestType)
+        {
+        case WskSetOption:
+            ioctl = IOCTL_SOCKET_SET_SOCK_OPT;
+            Opt.optval = (ULONGLONG)InputBuffer;
+            Opt.optlen = (int)InputSize;
+            break;
+        case WskGetOption:
+            ioctl = IOCTL_SOCKET_GET_SOCK_OPT;
+            Opt.optval = (ULONGLONG)OutputBuffer;
+            Opt.optlen = (int)OutputSize;
+            break;
+        }
+
+        Status = VioWskSocketBuildIOCTL(pSocket, ioctl, &Opt, sizeof(Opt), &Opt, sizeof(Opt), &IOCTLIrp);
+    } break;
+    case WskIoctl: {
+        VIRTIO_VSOCK_IOCTL_IN params;
+
+        params.dwIoControlCode = ControlCode;
+        params.lpvInBuffer = (ULONGLONG)InputBuffer;
+        params.cbInBuffer = (ULONG)InputSize;
+        Status = VioWskSocketBuildIOCTL(pSocket, IOCTL_SOCKET_IOCTL, &params, sizeof(params), OutputBuffer, (ULONG)OutputSize, &IOCTLIrp);
+    } break;
+    default:
+        Status = STATUS_INVALID_PARAMETER;
+        break;
+    }
+
+    if (!NT_SUCCESS(Status))
+        goto CompleteIrp;
+
+    CompContext = WskCompContextAlloc(wsksFinished, pSocket, Irp, NULL, NULL);
+    if (!CompContext)
+    {
+        Status = STATUS_INSUFFICIENT_RESOURCES;
+        goto FreeIOCTLIrp;
+    }
+
+    CompContext->BytesReturned = OutputSizeReturned;
+    CompContext->Event = pEvent;
+    CompContext->IoStatusBlock = pIoStatusBlock;
+    Status = CompContextSendIrp(CompContext, IOCTLIrp);
+    if (NT_SUCCESS(Status))
+    {
+        IOCTLIrp = NULL;
+        if (Status == STATUS_PENDING && pEvent)
+        {
+            KeWaitForSingleObject(&Event, Executive, KernelMode, FALSE, NULL);
+            Status = IoStatusBlock.Status;
+        }
+    }
+
+    WskCompContextDereference(CompContext);
+    Irp = NULL;
+FreeIOCTLIrp:
+    if (IOCTLIrp)
+        IoFreeIrp(IOCTLIrp);
+CompleteIrp:
+    if (Irp)
+        VioWskIrpComplete(pSocket, Irp, Status, 0);
+
+    if (pEvent)
+        IoFreeIrp(Irp);
+Exit:
+    DEBUG_EXIT_FUNCTION("0x%x", Status);
+    return Status;
 }
 
 NTSTATUS
