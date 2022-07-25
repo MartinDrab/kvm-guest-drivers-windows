@@ -185,3 +185,18 @@ WskWorkItemQueue(
     DEBUG_EXIT_FUNCTION_VOID();
     return;
 }
+
+void
+WskWorkItemFree(
+    _In_ PWSK_WORKITEM WorkItem
+)
+{
+    if (WorkItem->IoMethod)
+        IoUninitializeWorkItem((PIO_WORKITEM)WorkItem->IoWorkItem);
+
+    IoFreeIrp(WorkItem->Irp);
+    ExFreePoolWithTag(WorkItem, VIOSOCK_WSK_MEMORY_TAG);
+
+    DEBUG_EXIT_FUNCTION_VOID();
+    return;
+}
