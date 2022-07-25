@@ -70,6 +70,9 @@ typedef struct _VIOSOCKET_COMPLETION_CONTEXT {
             PWSK_WORKITEM CloseWorkItem;
         } Accept;
         struct {
+            PSOCKADDR RemoteAddress;
+        } BindConnect;
+        struct {
             const WSK_BUF *WskBuffer;
             ULONG CurrentMdlSize;
             ULONG LastMdlSize;

@@ -76,6 +76,21 @@ WskGeneralIrpCompletion(
                     IoFreeIrp(NextIrp);
                 }
             }
+			else if (Ctx->Specific.BindConnect.RemoteAddress)
+            {
+				Irp->IoStatus.Status = VioWskSocketBuildIOCTL(Ctx->Socket, IOCTL_SOCKET_CONNECT, Ctx->Specific.BindConnect.RemoteAddress, sizeof(SOCKADDR_VM), NULL, 0, &NextIrp);
+				if (!NT_SUCCESS(Irp->IoStatus.Status))
+					break;
+
+				Ctx->State = wsksConnectEx;
+                NextIrpStatus = CompContextSendIrp(Ctx, NextIrp);
+                if (!NT_SUCCESS(NextIrpStatus))
+                {
+                    Irp->IoStatus.Status = NextIrpStatus;
+                    Ctx->MasterIrp = NULL;
+                    IoFreeIrp(NextIrp);
+                }
+			}
  			else opState = wsksFinished;
 			break;
         case wsksAcceptLocal:
