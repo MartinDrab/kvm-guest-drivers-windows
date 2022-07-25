@@ -1038,14 +1038,25 @@ VioWskReceiveEx(
     _Inout_ PIRP       Irp
 )
 {
-    UNREFERENCED_PARAMETER(Socket);
-    UNREFERENCED_PARAMETER(Buffer);
-    UNREFERENCED_PARAMETER(Flags);
-    UNREFERENCED_PARAMETER(ControlInfoLength);
-    UNREFERENCED_PARAMETER(ControlInfo);
-    UNREFERENCED_PARAMETER(ControlFlags);
+    NTSTATUS Status = STATUS_UNSUCCESSFUL;
+    PVIOWSK_SOCKET pSocket = CONTAINING_RECORD(Socket, VIOWSK_SOCKET, WskSocket);
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; Buffer=0x%p; Flags=0x%x; ControlInfoLength=0x%p; ControlInfo=0x%p; ControlFlags=0x%p; Irp=0x%p", Socket, Buffer, Flags, ControlInfoLength, ControlInfo, ControlFlags, Irp);
 
-    return VioWskCompleteIrp(Irp, STATUS_NOT_IMPLEMENTED, 0);
+    if (ControlInfoLength && *ControlInfoLength > 0)
+    {
+        Status = STATUS_NOT_SUPPORTED;
+        pSocket = NULL;
+        goto CompleteIrp;
+    }
+
+    Status = VioWskReceive(Socket, Buffer, Flags, Irp);
+    Irp = NULL;
+CompleteIrp:
+    if (Irp)
+        VioWskIrpComplete(pSocket, Irp, Status, 0);
+
+    DEBUG_EXIT_FUNCTION("0x%x", Status);
+    return Status;
 }
 
 NTSTATUS
