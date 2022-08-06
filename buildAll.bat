@@ -28,6 +28,8 @@ call tools\build.bat vioserial\sys\vioser.vcxproj "Win10_SDV" %*
 if errorlevel 1 goto :fail
 call tools\build.bat viosock\sys\viosock.vcxproj "Win10_SDV" %*
 if errorlevel 1 goto :fail
+call tools\build.bat viosock\wsk\wsk.vcxproj
+if errorlevel 1 goto :fail
 call tools\build.bat viofs\pci\viofs.vcxproj "Win10_SDV" %*
 if errorlevel 1 goto :fail
 call tools\build.bat vioinput\sys\vioinput.vcxproj "Win10_SDV" %*
