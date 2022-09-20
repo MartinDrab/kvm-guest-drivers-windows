@@ -415,9 +415,8 @@ VioWskCloseSocket(
         pSocket = NULL;
         goto CompleteIrp;
     }
- 
-    IoReleaseRemoveLockAndWait(&pSocket->CloseRemoveLock, Irp);
-    VioWskCloseSocketInternal(pSocket);
+
+    VioWskCloseSocketInternal(pSocket, Irp);
     pSocket = NULL;
 
 CompleteIrp:
@@ -594,7 +593,7 @@ CloseNewSocket:
         if (acceptSocketAcquired)
             VioWskIrpRelease(pSocket, Irp);
 
-        VioWskCloseSocketInternal(pSocket);
+        VioWskCloseSocketInternal(pSocket, NULL);
         pSocket = NULL;
     }
 FreeCloseWorkItem:

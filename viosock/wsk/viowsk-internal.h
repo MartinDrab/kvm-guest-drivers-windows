@@ -52,7 +52,8 @@ VioWskSocketInternal(
 
 void
 VioWskCloseSocketInternal(
-    _Inout_ PVIOWSK_SOCKET Socket
+    _Inout_ PVIOWSK_SOCKET Socket,
+    _In_ PVOID ReleaseTag
 );
 
 NTSTATUS

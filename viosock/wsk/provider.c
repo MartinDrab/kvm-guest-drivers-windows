@@ -188,7 +188,7 @@ FreeBindIrp:
 CloseNewSocket:
     if (pSocket)
     {
-        VioWskCloseSocketInternal(pSocket);
+        VioWskCloseSocketInternal(pSocket, Irp);
         pSocket = NULL;
     }
 CompleteIrp:

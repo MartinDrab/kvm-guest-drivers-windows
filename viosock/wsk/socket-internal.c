@@ -238,15 +238,24 @@ Exit:
 
 void
 VioWskCloseSocketInternal(
-    _Inout_ PVIOWSK_SOCKET Socket
+    _Inout_ PVIOWSK_SOCKET Socket,
+    _In_ PVOID ReleaseTag
 )
 {
-    DEBUG_ENTER_FUNCTION("Socket=0x%p", Socket);
+    HANDLE fileHandle = NULL;
+    DEBUG_ENTER_FUNCTION("Socket=0x%p; ReleaseTag=0x%p", Socket, ReleaseTag);
 
     PAGED_CODE();
-    ZwClose(Socket->FileHandle);
-    ObDereferenceObject(Socket->FileObject);
-    ExFreePoolWithTag(Socket, VIOSOCK_WSK_MEMORY_TAG);
+    fileHandle = InterlockedExchangePointer(&Socket->FileHandle, NULL);
+    if (fileHandle != NULL)
+    {
+        ZwClose(fileHandle);
+        if (ReleaseTag)
+            IoReleaseRemoveLockAndWait(&Socket->CloseRemoveLock, ReleaseTag);
+        
+        ObDereferenceObject(Socket->FileObject);
+        ExFreePoolWithTag(Socket, VIOSOCK_WSK_MEMORY_TAG);
+    }
 
     DEBUG_EXIT_FUNCTION_VOID();
     return;
