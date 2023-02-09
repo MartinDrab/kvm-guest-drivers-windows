@@ -2,7 +2,7 @@
  * This file contains implementation of protocol for binding
  * virtio-net and SRIOV device
  *
- * Copyright (c) 2020 Red Hat, Inc.
+ * Copyright (c) 2020-2022 Red Hat, Inc.
  * Copyright (c) 2020 Oracle Corporation
  *
  *

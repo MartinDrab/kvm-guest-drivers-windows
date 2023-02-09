@@ -1,7 +1,7 @@
 /*
  * This file contains implementation of minimal user-mode service
  *
- * Copyright (c) 2020 Red Hat, Inc.
+ * Copyright (c) 2020-2022 Red Hat, Inc.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
