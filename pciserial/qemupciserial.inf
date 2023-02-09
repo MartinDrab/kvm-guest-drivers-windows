@@ -26,6 +26,7 @@ ClassGUID={4d36e971-e325-11ce-bfc1-08002be10318}
 Provider=%QEMU%
 DriverVer=12/29/2013,1.3.0
 CatalogFile=qemupciserial.cat
+PnpLockdown = 1
 
 [ControlFlags]
 ExcludeFromSelect=*
