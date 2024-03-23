@@ -26,7 +26,8 @@ DriverPackageDisplayName = %VirtioSocket.DeviceDesc%
 PnpLockdown = 1
 
 [DestinationDirs]
-DefaultDestDir = 12
+Drivers_Dir = 13
+Drivers_DirOld = 12
 VirtioSocket_Lib_CopyFiles = 11
 VirtioSocket_Lib_CopyFiles.WOW64 = 16425
 
@@ -43,7 +44,8 @@ viosocklib_x86.dll = 1
 ;*****************************************
 
 [Manufacturer]
-%VENDOR%=VirtioSocket,NT$ARCH$
+%VENDOR%=VirtioSocket,NT$ARCH$.10.0...16299
+%VENDOR%=VirtioSocketOld,NT$ARCH$
 
 [VirtioSocket.NT$ARCH$]
 ;
@@ -52,10 +54,20 @@ viosocklib_x86.dll = 1
 %VirtioSocket.DeviceDesc%=VirtioSocket_Device, PCI\VEN_1AF4&DEV_1012&SUBSYS_0013_INX_SUBSYS_VENDOR_ID&REV_00, PCI\VEN_1AF4&DEV_1012
 %VirtioSocket.DeviceDesc%=VirtioSocket_Device, PCI\VEN_14F4&DEV_1053&SUBSYS_1100_INX_SUBSYS_VENDOR_ID&REV_01, PCI\VEN_1AF4&DEV_1053
 
+[VirtioSocketOld.NT$ARCH$]
+%VirtioSocket.DeviceDesc%=VirtioSocket_DeviceOld, PCI\VEN_1AF4&DEV_1012&SUBSYS_0013_INX_SUBSYS_VENDOR_ID&REV_00, PCI\VEN_1AF4&DEV_1012
+%VirtioSocket.DeviceDesc%=VirtioSocket_DeviceOld, PCI\VEN_14F4&DEV_1053&SUBSYS_1100_INX_SUBSYS_VENDOR_ID&REV_01, PCI\VEN_1AF4&DEV_1053
+
 [VirtioSocket_Device.NT]
 CopyFiles=Drivers_Dir,VirtioSocket_Lib_CopyFiles,VirtioSocket_Lib_CopyFiles.WOW64
 
+[VirtioSocket_DeviceOld.NT]
+CopyFiles=Drivers_DirOld,VirtioSocket_Lib_CopyFiles,VirtioSocket_Lib_CopyFiles.WOW64
+
 [VirtioSocket_Device.NT.HW]
+AddReg=VirtioSocket_AddReg
+
+[VirtioSocket_DeviceOld.NT.HW]
 AddReg=VirtioSocket_AddReg
 
 [VirtioSocket_AddReg]
@@ -65,6 +77,9 @@ HKR,Interrupt Management\MessageSignaledInterruptProperties,MSISupported,0x00010
 HKR,Interrupt Management\MessageSignaledInterruptProperties,MessageNumberLimit,0x00010001,1
 
 [Drivers_Dir]
+viosock.sys
+
+[Drivers_DirOld]
 viosock.sys
 
 [VirtioSocket_Lib_CopyFiles]
@@ -78,8 +93,18 @@ viosocklib.dll,viosocklib_x86.dll,,0x00004000   ;  COPYFLG_IN_USE_TRY_RENAME
 [VirtioSocket_Device.NT.Services]
 AddService = VirtioSocket, 0x00000002, VirtioSocket_Service_Inst
 
+[VirtioSocket_DeviceOld.NT.Services]
+AddService = VirtioSocket, 0x00000002, VirtioSocketOld_Service_Inst
+
 ; -------------- VirtioSocket driver install sections
 [VirtioSocket_Service_Inst]
+DisplayName    = %VirtioSocket.ServiceDesc%
+ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
+StartType      = 3               ; SERVICE_DEMAND_START
+ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
+ServiceBinary  = %13%\viosock.sys
+
+[VirtioSocketOld_Service_Inst]
 DisplayName    = %VirtioSocket.ServiceDesc%
 ServiceType    = 1               ; SERVICE_KERNEL_DRIVER
 StartType      = 3               ; SERVICE_DEMAND_START
@@ -90,6 +115,9 @@ ServiceBinary  = %12%\viosock.sys
 ;
 
 [VirtioSocket_Device.NT.Wdf]
+KmdfService =  VirtioSocket, VirtioSocket_wdfsect
+
+[VirtioSocket_DeviceOld.NT.Wdf]
 KmdfService =  VirtioSocket, VirtioSocket_wdfsect
 
 [VirtioSocket_wdfsect]
