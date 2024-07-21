@@ -14,6 +14,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winsvc.h>
+#include "vio_sockets.h"
 #else
 #include <stdarg.h>
 #include <sys/types.h>
@@ -25,19 +26,20 @@
 #include <netdb.h>
 #include <sys/wait.h>
 #include <poll.h>
+#include <linux/vm_sockets.h>
 #endif
-
-#include "vio_sockets.h"
 
 
 #ifndef _WIN32
 #define closesocket(a)			close(a)
+#define ioctlsocket             ioctl
 #define SD_RECEIVE				SHUT_RD
 #define SD_SEND					SHUT_WR
 #define SD_BOTH					SHUT_RDWR
 #define SOCKET_ERROR			-1
 #define INVALID_SOCKET			-1
 #define SOCKET					int
+typedef int ADDRESS_FAMILY;
 #else
 typedef int ssize_t;
 #define poll(a, b, c)			WSAPoll(a, b, c)

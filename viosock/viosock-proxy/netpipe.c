@@ -17,13 +17,20 @@ typedef enum _ECommEndType {
 	cetAccept,
 } ECommEndType, *PECommEndType;
 
+#define MAX_LISTEN_COUNT					32
+
 typedef struct _CHANNEL_END {
 	ECommEndType Type;
 	char *Address;
 	char *AcceptAddress;
 	int AddressFamily;
 	SOCKET EndSocket;
-	SOCKET ListenSocket;
+	size_t ListenCount;
+	SOCKET ListenSockets[MAX_LISTEN_COUNT];
+	char *ListenAddresses[MAX_LISTEN_COUNT];
+#ifdef _WIN32
+	WSAEVENT ListenEvents[MAX_LISTEN_COUNT];
+#endif
 } CHANNEL_END, *PCHANNEL_END;
 
 
@@ -41,6 +48,24 @@ static volatile int _terminated = 0;
 
 
 
+static int _SocketError()
+{
+	int ret = 0;
+#ifdef _WIN32
+	ret = WSAGetLastError();
+	errno = ret;
+	switch (ret) {
+		case WSAEWOULDBLOCK:
+			errno = EWOULDBLOCK;
+			break;
+	}
+#endif
+	ret = errno;
+
+	return ret;
+}
+
+
 static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
 {
 	int ret = 0;
@@ -49,13 +74,19 @@ static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
 
 	len = recv(Source, dataBuffer, sizeof(dataBuffer), 0);
 	if (len > 0) {
-		ret = 1;
+		ret = len;
 		LogPacket("<<< %zu bytes received", len);
 		while (len > 0) {
 			ssize_t tmp = 0;
 
 			tmp = send(Dest, dataBuffer, len, 0);
 			if (tmp == -1) {
+				tmp = _SocketError();
+				if (tmp == EWOULDBLOCK) {
+					sleep(1);
+					continue;
+				}
+
 				ret = -1;
 				break;
 			}
@@ -75,39 +106,89 @@ static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
 static void _ProcessChannel(PCHANNEL_DATA Data)
 {
 	int ret = 0;
-	fd_set fs;
 	struct timeval tv;
+#ifdef _WIN32
+	WSAEVENT readEvent = WSA_INVALID_EVENT;
+#else
+	fd_set fs;
+#endif
 
+	memset(&tv, 0, sizeof(tv));
 	tv.tv_sec = 1;
 	tv.tv_usec = 0;
-	FD_ZERO(&fs);
-	FD_SET(Data->SourceSocket, &fs);
-	LogInfo("Starting to process the connection (%s --> %s)", Data->SourceAddress, Data->DestAddress);
-	do {
-		ret = select(0, &fs, NULL, NULL, &tv);
-		if (ret > 0) {
-			ret = _StreamData(Data->SourceSocket, Data->DestSocket, 0);
+#ifdef _WIN32
+	LogInfo("Creating read event");
+	readEvent = WSACreateEvent();
+	if (readEvent != WSA_INVALID_EVENT) {
+		ret = WSAEventSelect(Data->SourceSocket, readEvent, FD_CLOSE | FD_READ);
+		if (ret == SOCKET_ERROR) {
+			ret = _SocketError();
+			WSACloseEvent(readEvent);
+		}
+	} else ret = _SocketError();
+#endif
+	if (ret == 0) {
+		LogInfo("Starting to process the connection (%s --> %s)", Data->SourceAddress, Data->DestAddress);
+		do {
+#ifdef _WIN32
+			ret = WSAWaitForMultipleEvents(1, &readEvent, FALSE, tv.tv_sec*1000, FALSE);
 			switch (ret) {
-				case 0:
-					LogInfo("Connection closed");
-					ret = -1;
-					break;
-				case -1:
-					LogError("Connection aborted");
-					break;
-				default:
+				case WSA_WAIT_EVENT_0: {
+					WSANETWORKEVENTS nes;
+
+					ret = 1;
+					memset(&nes, 0, sizeof(nes));
+					if (WSAEnumNetworkEvents(Data->SourceSocket, readEvent, &nes) == SOCKET_ERROR)
+						ret = -1;
+				} break;
+				case WSA_WAIT_TIMEOUT:
 					ret = 0;
 					break;
+				default:
+					ret = -1;
+					break;
 			}
-		} else if (ret == SOCKET_ERROR) { 
-			if (errno == EINTR)
-				ret = 0;
-#ifdef _WIN32
-			if (WSAGetLastError() == WSAETIMEDOUT)
-				ret = 0;
+#else
+			FD_ZERO(&fs);
+			FD_SET(Data->SourceSocket, &fs);
+			ret = select((int)Data->SourceSocket + 1, &fs, NULL, NULL, &tv);
 #endif
-		}
-	} while (!_terminated && ret >= 0);
+			if (ret > 0) {
+				ret = _StreamData(Data->SourceSocket, Data->DestSocket, 0);
+				switch (ret) {
+					case 0:
+						LogInfo("Connection closed");
+						ret = -1;
+						break;
+					case -1:
+						ret = _SocketError();
+						if (ret == EWOULDBLOCK)
+							ret = 0;
+
+						if (ret != 0)
+							LogError("Connection aborted %i", ret);
+						break;
+					default:
+						ret = 0;
+						break;
+				}
+			} else if (ret == SOCKET_ERROR) {
+				ret = _SocketError();
+				if (errno == EINTR)
+					ret = 0;
+#ifdef _WIN32
+				if (ret == EWOULDBLOCK)
+					ret = 0;
+#endif
+				if (ret == 0)
+					LogError("Error %i", ret);
+			}
+		} while (!_terminated && ret >= 0);
+	
+#ifdef _WIN32
+		WSACloseEvent(readEvent);
+#endif
+	}
 
 	shutdown(Data->SourceSocket, SD_BOTH);
 	closesocket(Data->SourceSocket);
@@ -177,12 +258,8 @@ char *sockaddrstr(const struct sockaddr *Addr)
 static int _PrepareChannelEnd(PCHANNEL_END End)
 {
 	int ret = 0;
-	int af = AF_UNSPEC;
-	SOCKET sock = INVALID_SOCKET;
 	struct addrinfo hints;
 	struct addrinfo *addrs = NULL;
-	struct sockaddr_storage acceptAddr;
-	int acceptAddrLen = sizeof(acceptAddr);
 	struct sockaddr *genAddr = NULL;
 	socklen_t genAddrLen = 0;
 	struct sockaddr_un *unixAddress = NULL;
@@ -191,23 +268,33 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 	switch (End->AddressFamily) {
 		case AF_UNSPEC:
 		case AF_INET:
-		case AF_INET6:
+		case AF_INET6: {
+			char *service = NULL;
+			
 			memset(&hints, 0, sizeof(hints));
 			hints.ai_family = End->AddressFamily;
 			hints.ai_socktype = SOCK_STREAM;
 			hints.ai_protocol = 0;
-			ret = getaddrinfo(End->Address, NULL, &hints, &addrs);
-			if (ret == 0) {
-				af = addrs->ai_family;
-				if (af == AF_UNSPEC)
-					af = End->AddressFamily;
+			service = End->Address + strlen(End->Address);
+			while (service != End->Address && *service != ':')
+				--service;
 
-				genAddr = addrs->ai_addr;
-				genAddrLen = (socklen_t)addrs->ai_addrlen;
-			} else LogError("getaddrinfo: %i", ret);
-			break;
+
+			if (service != End->Address) {
+				*service = '\0';
+				++service;
+			} else service = NULL;
+
+			ret = getaddrinfo(End->Address, service, &hints, &addrs);
+			if (service != NULL) {
+				--service;
+				*service = ':';
+			}
+
+			if (ret != 0)
+				LogError("getaddrinfo: %i", ret);
+		} break;
 		case AF_UNIX:
-			af = AF_UNIX;
 			unixAddress = (struct sockaddr_un *)malloc(sizeof(struct sockaddr_un));
 			if (unixAddress != NULL) {
 				memset(unixAddress, 0, sizeof(struct sockaddr_un));
@@ -217,7 +304,9 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 				genAddrLen = SUN_LEN(unixAddress);
 			} else ret = ENOMEM;
 			break;
-		default: {			
+		default: {
+			ADDRESS_FAMILY af = AF_UNSPEC;
+
 			af = End->AddressFamily;
 			vm = (struct sockaddr_vm *)malloc(sizeof(struct sockaddr_vm));
 			if (vm != NULL) {
@@ -238,45 +327,159 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 	}
 
 	if (ret == 0) {
-		LogInfo("Creating a socket");
-		sock = socket(af, SOCK_STREAM, 0);
-		if (sock != INVALID_SOCKET) {
+		if (genAddrLen > 0) {
+			addrs = (struct addrinfo *)malloc(sizeof(struct addrinfo));
+			if (addrs != NULL) {
+				memset(addrs, 0, sizeof(struct addrinfo));
+				addrs->ai_family = End->AddressFamily;
+				addrs->ai_addr = genAddr;
+				addrs->ai_addrlen = genAddrLen;
+			} else ret = ENOMEM;
+		}
+
+		if (ret == 0) {
 			switch (End->Type) {
 				case cetAccept:
-					if (End->ListenSocket == INVALID_SOCKET) {
-						LogInfo("Binding the socket");
-						ret = bind(sock, genAddr, genAddrLen);
-						if (ret == 0) {
-							LogInfo("Listening");
-							ret = listen(sock, SOMAXCONN);
-							if (ret == -1)
-								LogError("Error %u", errno);
-						} else LogError("Error %u", errno);
+					if (End->ListenCount == 0) {
+						const struct addrinfo *tmp = NULL;
+
+						tmp = addrs;
+						while (ret == 0 && tmp != NULL) {
+							int nb = 1;
+							const size_t index = End->ListenCount;
+
+							End->ListenAddresses[index] = sockaddrstr(tmp->ai_addr);
+							if (End->ListenAddresses[index] == NULL) {
+								ret = ENOMEM;
+								break;
+							}
+
+							LogInfo("Creating a socket #%zu", index);
+							End->ListenSockets[index] = socket(tmp->ai_family, SOCK_STREAM, 0);
+							if (End->ListenSockets[index] == INVALID_SOCKET) {
+								ret = _SocketError();
+								free(End->ListenAddresses[index]);
+								LogError("Error %i", ret);
+								break;
+							}
+							
+							ret = ioctlsocket(End->ListenSockets[index], FIONBIO, &nb);
+							if (ret == SOCKET_ERROR) {
+								ret = _SocketError();
+								closesocket(End->ListenSockets[index]);
+								free(End->ListenAddresses[index]);
+								LogError("Error %i", ret);
+								break;
+							}
+
+							LogInfo("Binding to address %s", End->ListenAddresses[index]);
+							ret = bind(End->ListenSockets[index], tmp->ai_addr, tmp->ai_addrlen);
+							if (ret != 0) {
+								ret = _SocketError();
+								closesocket(End->ListenSockets[index]);
+								free(End->ListenAddresses[index]);
+								tmp = tmp->ai_next;
+								LogWarning("Error %i", ret);
+								continue;
+							}
+#ifdef _WIN32
+							LogInfo("Creating listen event");
+							End->ListenEvents[index] = WSACreateEvent();
+							if (End->ListenEvents[index] == WSA_INVALID_EVENT) {
+								ret = _SocketError();
+								closesocket(End->ListenSockets[index]);
+								free(End->ListenAddresses[index]);
+								LogWarning("Error %i", ret);
+								break;
+							}
+
+							ret = WSAEventSelect(End->ListenSockets[index], End->ListenEvents[index], FD_CLOSE | FD_ACCEPT);
+							if (ret == SOCKET_ERROR) {
+								ret = _SocketError();
+								WSACloseEvent(End->ListenEvents[index]);
+								closesocket(End->ListenSockets[index]);
+								free(End->ListenAddresses[index]);
+								LogWarning("Error %i", ret);
+								break;
+							}
+#endif
+							LogInfo("Listening...");
+							ret = listen(End->ListenSockets[index], SOMAXCONN);
+							if (ret == SOCKET_ERROR) {
+								ret = _SocketError();
+								WSACloseEvent(End->ListenEvents[index]);
+								closesocket(End->ListenSockets[index]);
+								free(End->ListenAddresses[index]);
+								LogError("Error %i", ret);
+								tmp = tmp->ai_next;
+								continue;
+							}
+
+							tmp = tmp->ai_next;
+							++End->ListenCount;
+						}
+
+						if (ret != 0) {
+							for (size_t i = 0; i < End->ListenCount; ++i) {
+#ifdef _WIN32
+								WSACloseEvent(End->ListenEvents[i]);
+#endif
+								closesocket(End->ListenSockets[i]);
+								free(End->ListenAddresses[i]);
+							}
+
+							End->ListenCount = 0;
+						} else if (End->ListenCount == 0)
+							ret = ENOENT;
 					}
 
 					if (ret == 0) {
-						fd_set fs;
 						struct timeval tv;
-						SOCKET listenSocket = INVALID_SOCKET;
 
-						listenSocket = (End->ListenSocket != INVALID_SOCKET ? End->ListenSocket : sock);
-						FD_ZERO(&fs);
-						FD_SET(listenSocket, &fs);
+						memset(&tv, 0, sizeof(tv));
 						tv.tv_sec = 1;
 						tv.tv_usec = 0;
 						LogInfo("Selecting...");
 						do {
-							ret = select(0, &fs, NULL, NULL, &tv);
+#ifdef _WIN32
+							ret = WSAWaitForMultipleEvents(End->ListenCount, End->ListenEvents, FALSE, tv.tv_sec*1000, FALSE);
+							switch (ret) {
+								case WSA_WAIT_TIMEOUT:
+									ret = 0;
+									break;
+								case WSA_WAIT_FAILED:
+									ret = -1;
+									break;
+								default: {
+									WSANETWORKEVENTS nes;
+
+									if (ret - WSA_WAIT_EVENT_0 < End->ListenCount) {
+										memset(&nes, 0, sizeof(nes));
+										if (WSAEnumNetworkEvents(End->ListenSockets[ret], End->ListenEvents[ret], &nes) == SOCKET_ERROR)
+											ret = -1;
+									} else ret = -1;
+								} break;
+							}
+#else
+							fd_set fs;
+
+							FD_ZERO(&fs);
+							for (size_t i = 0; i < End->ListenCount; ++i)
+								FD_SET(listenSockets[i], &fs);
+
+							ret = select(End->ListenSockets[End->ListenCount - 1] + 1, &fs, NULL, &fs, &tv);
+#endif
 							if (ret > 0) {
+								struct sockaddr_storage acceptAddr;
+								int acceptAddrLen = sizeof(acceptAddr);
+
 								LogInfo("Accepting...");
-								End->EndSocket = accept(listenSocket, (struct sockaddr *)&acceptAddr, &acceptAddrLen);
+								End->EndSocket = accept(End->ListenSockets[ret], (struct sockaddr *)&acceptAddr, &acceptAddrLen);
 								if (End->EndSocket != INVALID_SOCKET) {
 									End->AcceptAddress = sockaddrstr((struct sockaddr *)&acceptAddr);
 									if (End->AcceptAddress != NULL) {
 										ret = 0;
 										LogInfo("Accepted a connection from %s", End->AcceptAddress);
-										End->ListenSocket = sock;
-										sock = INVALID_SOCKET;
 									} else ret = ENOMEM;
 
 									if (End->AcceptAddress == NULL) {
@@ -284,52 +487,95 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 										closesocket(End->EndSocket);
 										End->EndSocket = INVALID_SOCKET;
 									}
-								} else ret = errno;
+								} else ret = _SocketError();
 
 								if (ret == 0)
 									break;
+
+								if (ret == EAGAIN || ret == EWOULDBLOCK)
+									ret = 0;
 							} else if (ret == SOCKET_ERROR) {
-								if (errno == EINTR)
+								ret = _SocketError();
+								if (ret == EINTR)
 									ret = 0;
 
+								if (ret == EWOULDBLOCK)
+									ret = 0;
 #ifdef _WIN32
-								if (WSAGetLastError() == WSAETIMEDOUT)
+								if (ret == WSAETIMEDOUT)
 									ret = 0;
 #endif
+							
+								if (ret != 0) {
+									LogError("%i", ret);
+								}									
 							}
 						} while (!_terminated && ret == 0);
+					}
+					break;
+				case cetConnect: {
+					const struct addrinfo *tmp = NULL;
 
-						if (End->EndSocket == INVALID_SOCKET)
-							ret = -1;
+					tmp = addrs;
+					while (tmp != NULL) {
+						int nb = 1;
+						char *addrstr = NULL;
+
+						addrstr = sockaddrstr(tmp->ai_addr);
+						if (addrstr == NULL) {
+							ret = ENOMEM;
+							break;
+						}
+
+						LogInfo("Creating a socket for %s", addrstr);
+						End->EndSocket = socket(tmp->ai_family, SOCK_STREAM, 0);
+						if (End->EndSocket == INVALID_SOCKET) {
+							ret = _SocketError();
+							free(addrstr);
+							LogError("Error %i", ret);
+							tmp = tmp->ai_next;
+							continue;
+						}
+					
+						LogInfo("Connesting to %s (%s)", End->Address, addrstr);
+						ret = connect(End->EndSocket, tmp->ai_addr, tmp->ai_addrlen);
+						if (ret == SOCKET_ERROR) {
+							ret = _SocketError();
+							closesocket(End->EndSocket);
+							End->EndSocket = INVALID_SOCKET;
+							free(addrstr);
+							LogError("ioctlsocket: %i", ret);
+							tmp = tmp->ai_next;
+							continue;
+						}
+
+						ret = ioctlsocket(End->EndSocket, FIONBIO, &nb);
+						if (ret == SOCKET_ERROR) {
+							ret = _SocketError();
+							closesocket(End->EndSocket);
+							End->EndSocket = INVALID_SOCKET;
+							free(addrstr);
+							LogError("ioctlsocket: %i", ret);
+							tmp = tmp->ai_next;
+							continue;
+						}
+
+						End->AcceptAddress = addrstr;
+						break;
 					}
-					break;
-				case cetConnect:
-					End->AcceptAddress = sockaddrstr(genAddr);
-					if (End->AcceptAddress != NULL) {
-						LogInfo("Connesting to %s (%s)", End->Address, End->AcceptAddress);
-						if (genAddr != NULL) {
-							ret = connect(sock, genAddr, genAddrLen);
-							if (ret == 0) {
-								End->EndSocket = sock;
-								sock = INVALID_SOCKET;
-							}
-						} else ret = EINVAL;
-					} else {
-						ret = ENOMEM;
-						LogError("Out of memory");
-					}
-					break;
+
+				} break;
 			}
-
-			if (sock != INVALID_SOCKET)
-				closesocket(sock);
-		} else ret = errno;
+		}
 
 		if (unixAddress != NULL)
 			free(unixAddress);
 		
-		if (addrs != NULL)
-			freeaddrinfo(addrs);
+		if (addrs != NULL) {
+			if (genAddr != NULL)
+				free(addrs);
+			else freeaddrinfo(addrs);
+		}
 
 		if (vm != NULL)
 			free(vm);
@@ -374,7 +620,11 @@ static void _ProcessAddress(const char *Address, const char **RealAddress, ADDRE
 	};
 	const size_t len = strlen(Address);
 
+#ifdef _WIN32
 	families[3] = ViosockGetAF();
+#else
+	families[3] = AF_VSOCK;
+#endif
 	*Family = AF_UNSPEC;
 	*RealAddress = Address;
 	for (size_t i = 0; i < sizeof(prefixes)/sizeof(prefixes[0]); ++i) {
@@ -600,9 +850,7 @@ int main(int argc, char *argv[])
 	CHANNEL_END dest;
 
 	memset(&source, 0, sizeof(source));
-	source.ListenSocket = INVALID_SOCKET;
 	memset(&dest, 0, sizeof(dest));
-	dest.ListenSocket = INVALID_SOCKET;
 	while (!_terminated) {
 		source.Type = _sourceMode;
 		source.AddressFamily = _sourceAF;
@@ -638,7 +886,7 @@ int main(int argc, char *argv[])
 					HANDLE ths[2];;
 
 					memset(ths, 0, sizeof(ths));
-					for (size_t i = 0; i < 2; ++i) {
+					for (size_t i = 0; i < sizeof(ths)/sizeof(ths[0]); ++i) {
 						ths[i] = CreateThread(NULL, 0, _ChannelThreadWrapper, d + i, 0, &threadId);
 						if (ths[i] == NULL) {
 							ret = GetLastError();
@@ -656,7 +904,7 @@ int main(int argc, char *argv[])
 					}
 
 					if (ret == 0) {
-						for (size_t i = 0; i < 2; ++i)
+						for (size_t i = 0; i < sizeof(ths)/sizeof(ths[0]); ++i)
 							CloseHandle(ths[i]);
 					}
 #else
@@ -675,11 +923,6 @@ int main(int argc, char *argv[])
 					free(d);
 #endif
 				} else ret = ENOMEM;
-
-				if (dest.ListenSocket != INVALID_SOCKET) {
-					closesocket(dest.ListenSocket);
-					dest.ListenSocket = INVALID_SOCKET;
-				}
 
 				if (ret != 0)
 					closesocket(dest.EndSocket);
