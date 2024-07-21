@@ -46,6 +46,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwsk", "wsk\wsk.vcxpr
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwsk-test", "viosock-wsk-test\viosock-wsk-test.vcxproj", "{A2A7AFFC-BEFE-4066-A1DD-23242FAFAD70}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosock-proxy", "viosock-proxy\viosock-proxy.vcxproj", "{2A22423B-0199-4D6E-9CF2-8574C9060BF3}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Win10 Release|ARM64 = Win10 Release|ARM64
@@ -172,6 +174,18 @@ Global
 		{A2A7AFFC-BEFE-4066-A1DD-23242FAFAD70}.Win11 Release|x86.ActiveCfg = Win11 Release|Win32
 		{A2A7AFFC-BEFE-4066-A1DD-23242FAFAD70}.Win11 Release|x86.Build.0 = Win11 Release|Win32
 		{A2A7AFFC-BEFE-4066-A1DD-23242FAFAD70}.Win11 Release|x86.Deploy.0 = Win11 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|ARM64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|ARM64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x86.ActiveCfg = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x86.Build.0 = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|ARM64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|ARM64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x86.ActiveCfg = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x86.Build.0 = Win10 Release|Win32
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
