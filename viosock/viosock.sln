@@ -46,6 +46,8 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwsk", "wsk\wsk.vcxpr
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwsk-test", "viosock-wsk-test\viosock-wsk-test.vcxproj", "{A2A7AFFC-BEFE-4066-A1DD-23242FAFAD70}"
 EndProject
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosock-proxy", "viosock-proxy\viosock-proxy.vcxproj", "{2A22423B-0199-4D6E-9CF2-8574C9060BF3}"
+EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwspsvc", "wspsvc\viosockwspsvc.vcxproj", "{B8C784B3-7914-4539-B728-F2EAE5C9795E}"
 EndProject
 Global
@@ -334,6 +336,18 @@ Global
 		{B8C784B3-7914-4539-B728-F2EAE5C9795E}.Release|x64.Build.0 = Win10 Release|x64
 		{B8C784B3-7914-4539-B728-F2EAE5C9795E}.Release|x86.ActiveCfg = Win10 Release|Win32
 		{B8C784B3-7914-4539-B728-F2EAE5C9795E}.Release|x86.Build.0 = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|ARM64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|ARM64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x86.ActiveCfg = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win10 Release|x86.Build.0 = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|ARM64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|ARM64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x64.ActiveCfg = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x64.Build.0 = Win10 Release|x64
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x86.ActiveCfg = Win10 Release|Win32
+		{2A22423B-0199-4D6E-9CF2-8574C9060BF3}.Win11 Release|x86.Build.0 = Win10 Release|Win32
 		{B8C784B3-7914-4539-B728-F2EAE5C9795E}.Win10 Release|ARM64.ActiveCfg = Win10 Release|ARM64
 		{B8C784B3-7914-4539-B728-F2EAE5C9795E}.Win10 Release|ARM64.Build.0 = Win10 Release|ARM64
 		{B8C784B3-7914-4539-B728-F2EAE5C9795E}.Win10 Release|x64.ActiveCfg = Win10 Release|x64
