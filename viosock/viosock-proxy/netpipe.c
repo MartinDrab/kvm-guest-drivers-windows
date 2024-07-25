@@ -131,7 +131,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 		LogInfo("Starting to process the connection (%s --> %s)", Data->SourceAddress, Data->DestAddress);
 		do {
 #ifdef _WIN32
-			ret = WSAWaitForMultipleEvents(1, &readEvent, FALSE, tv.tv_sec*1000, FALSE);
+			ret = WSAWaitForMultipleEvents(1, &readEvent, FALSE, tv.tv_sec*1000, TRUE);
 			switch (ret) {
 				case WSA_WAIT_EVENT_0: {
 					WSANETWORKEVENTS nes;
@@ -142,6 +142,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 						ret = -1;
 				} break;
 				case WSA_WAIT_TIMEOUT:
+				case WSA_WAIT_IO_COMPLETION:
 					ret = 0;
 					break;
 				default:
@@ -190,11 +191,13 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 #endif
 	}
 
+	LogInfo("Shutting down the socket");
 	shutdown(Data->SourceSocket, SD_BOTH);
 	closesocket(Data->SourceSocket);
 	if (Data->SourceAddress != NULL)
 		free(Data->SourceAddress);
 
+	LogInfo("Exitting");
 	return;
 }
 
@@ -274,7 +277,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 			memset(&hints, 0, sizeof(hints));
 			hints.ai_family = End->AddressFamily;
 			hints.ai_socktype = SOCK_STREAM;
-			hints.ai_protocol = 0;
+			hints.ai_protocol = IPPROTO_TCP;
 			service = End->Address + strlen(End->Address);
 			while (service != End->Address && *service != ':')
 				--service;
@@ -355,7 +358,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							}
 
 							LogInfo("Creating a socket #%zu", index);
-							End->ListenSockets[index] = socket(tmp->ai_family, SOCK_STREAM, 0);
+							End->ListenSockets[index] = socket(tmp->ai_family, SOCK_STREAM, tmp->ai_protocol);
 							if (End->ListenSockets[index] == INVALID_SOCKET) {
 								ret = _SocketError();
 								free(End->ListenAddresses[index]);
@@ -374,7 +377,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 
 							LogInfo("Binding to address %s", End->ListenAddresses[index]);
 							ret = bind(End->ListenSockets[index], tmp->ai_addr, tmp->ai_addrlen);
-							if (ret != 0) {
+							if (ret == INVALID_SOCKET) {
 								ret = _SocketError();
 								closesocket(End->ListenSockets[index]);
 								free(End->ListenAddresses[index]);
@@ -439,12 +442,13 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 						memset(&tv, 0, sizeof(tv));
 						tv.tv_sec = 1;
 						tv.tv_usec = 0;
-						LogInfo("Selecting...");
+						LogInfo("Selecting (%zu events)...", End->ListenCount);
 						do {
 #ifdef _WIN32
-							ret = WSAWaitForMultipleEvents(End->ListenCount, End->ListenEvents, FALSE, tv.tv_sec*1000, FALSE);
+							ret = WSAWaitForMultipleEvents(End->ListenCount, End->ListenEvents, FALSE, tv.tv_sec*1000, TRUE);
 							switch (ret) {
 								case WSA_WAIT_TIMEOUT:
+								case WSA_WAIT_IO_COMPLETION:
 									ret = 0;
 									break;
 								case WSA_WAIT_FAILED:
@@ -455,8 +459,9 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 
 									if (ret - WSA_WAIT_EVENT_0 < End->ListenCount) {
 										memset(&nes, 0, sizeof(nes));
-										if (WSAEnumNetworkEvents(End->ListenSockets[ret], End->ListenEvents[ret], &nes) == SOCKET_ERROR)
-											ret = -1;
+										if (WSAEnumNetworkEvents(End->ListenSockets[ret], End->ListenEvents[ret], &nes) == 0)
+											ret += 1;
+										else ret = -1;
 									} else ret = -1;
 								} break;
 							}
@@ -473,6 +478,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 								struct sockaddr_storage acceptAddr;
 								int acceptAddrLen = sizeof(acceptAddr);
 
+								ret -= 1;
 								LogInfo("Accepting...");
 								End->EndSocket = accept(End->ListenSockets[ret], (struct sockaddr *)&acceptAddr, &acceptAddrLen);
 								if (End->EndSocket != INVALID_SOCKET) {
@@ -528,7 +534,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 						}
 
 						LogInfo("Creating a socket for %s", addrstr);
-						End->EndSocket = socket(tmp->ai_family, SOCK_STREAM, 0);
+						End->EndSocket = socket(tmp->ai_family, SOCK_STREAM, tmp->ai_protocol);
 						if (End->EndSocket == INVALID_SOCKET) {
 							ret = _SocketError();
 							free(addrstr);
@@ -544,7 +550,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							closesocket(End->EndSocket);
 							End->EndSocket = INVALID_SOCKET;
 							free(addrstr);
-							LogError("ioctlsocket: %i", ret);
+							LogError("connect: %i", ret);
 							tmp = tmp->ai_next;
 							continue;
 						}
