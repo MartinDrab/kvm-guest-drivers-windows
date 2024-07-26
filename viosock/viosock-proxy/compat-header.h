@@ -27,6 +27,7 @@
 #include <sys/wait.h>
 #include <poll.h>
 #include <linux/vm_sockets.h>
+#include <sys/ioctl.h>
 #endif
 
 
