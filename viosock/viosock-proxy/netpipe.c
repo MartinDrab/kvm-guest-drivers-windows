@@ -10,6 +10,10 @@ typedef struct _CHANNEL_DATA {
 	char *SourceAddress;
 	char *DestAddress;
 	struct timeval Timeout;
+#ifdef _WIN32
+	volatile LONG Shutdown;
+	volatile LONG *pShutdown;
+#endif
 } CHANNEL_DATA, *PCHANNEL_DATA;
 
 typedef enum _ECommEndType {
@@ -44,7 +48,6 @@ static uint32_t _timeout = 1;
 static int _help = 0;
 static int _version = 0;
 static char *_logFile = NULL;
-static volatile int _terminated = 0;
 
 
 
@@ -75,7 +78,7 @@ static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
 	len = recv(Source, dataBuffer, sizeof(dataBuffer), 0);
 	if (len > 0) {
 		ret = len;
-		LogPacket("<<< %zu bytes received", len);
+		LogPacket("<<< %i bytes received", len);
 		while (len > 0) {
 			ssize_t tmp = 0;
 
@@ -83,6 +86,7 @@ static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
 			if (tmp == -1) {
 				tmp = _SocketError();
 				if (tmp == EWOULDBLOCK) {
+					LogPacket("--- Destination socket full, sleeping...");
 					sleep(1);
 					continue;
 				}
@@ -92,7 +96,7 @@ static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
 			}
 			
 			if (tmp >= 0)
-				LogPacket(">>> %zu bytes sent", tmp);
+				LogPacket(">>> %i of %i bytes sent", tmp, len);
 		
 			len -= tmp;
 		}
@@ -120,7 +124,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	LogInfo("Creating read event");
 	readEvent = WSACreateEvent();
 	if (readEvent != WSA_INVALID_EVENT) {
-		ret = WSAEventSelect(Data->SourceSocket, readEvent, FD_CLOSE | FD_READ);
+		ret = WSAEventSelect(Data->SourceSocket, readEvent, FD_OOB | FD_CLOSE | FD_READ);
 		if (ret == SOCKET_ERROR) {
 			ret = _SocketError();
 			WSACloseEvent(readEvent);
@@ -166,8 +170,10 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 						if (ret == EWOULDBLOCK)
 							ret = 0;
 
-						if (ret != 0)
+						if (ret != 0) {
 							LogError("Connection aborted %i", ret);
+							ret = -1;
+						}
 						break;
 					default:
 						ret = 0;
@@ -184,7 +190,11 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 				if (ret == 0)
 					LogError("Error %i", ret);
 			}
-		} while (!_terminated && ret >= 0);
+		} while (ret >= 0
+#ifdef _WIN32
+			&& InterlockedCompareExchange(Data->pShutdown, 1, 1) == 0
+#endif
+			);
 	
 #ifdef _WIN32
 		WSACloseEvent(readEvent);
@@ -196,6 +206,15 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	closesocket(Data->SourceSocket);
 	if (Data->SourceAddress != NULL)
 		free(Data->SourceAddress);
+
+#ifdef _WIN32
+	InterlockedIncrement(Data->pShutdown);
+#else
+	shutdown(Data->DestSocket, SD_BOTH);
+	closesocket(Data->DestSocket);
+	if (Data->DestAddress != NULL)
+		free(Data->DestAddress);
+#endif
 
 	LogInfo("Exitting");
 	return;
@@ -484,12 +503,19 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 								if (End->EndSocket != INVALID_SOCKET) {
 									End->AcceptAddress = sockaddrstr((struct sockaddr *)&acceptAddr);
 									if (End->AcceptAddress != NULL) {
+										int ka = 1;									ret = _SocketError();
+
 										ret = 0;
 										LogInfo("Accepted a connection from %s", End->AcceptAddress);
+										ret = setsockopt(End->EndSocket, SOL_SOCKET, SO_KEEPALIVE, (char*)&ka, sizeof(ka));;
+										if (ret == SOCKET_ERROR) {
+											free(End->AcceptAddress);
+											End->AcceptAddress = NULL;
+										}
 									} else ret = ENOMEM;
 
 									if (End->AcceptAddress == NULL) {
-										LogError("Out of memory");
+										LogError("Error %i", ret);
 										closesocket(End->EndSocket);
 										End->EndSocket = INVALID_SOCKET;
 									}
@@ -516,7 +542,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 									LogError("%i", ret);
 								}									
 							}
-						} while (!_terminated && ret == 0);
+						} while (ret == 0);
 					}
 					break;
 				case cetConnect: {
@@ -551,6 +577,17 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							End->EndSocket = INVALID_SOCKET;
 							free(addrstr);
 							LogError("connect: %i", ret);
+							tmp = tmp->ai_next;
+							continue;
+						}
+
+						ret = setsockopt(End->EndSocket, SOL_SOCKET, SO_KEEPALIVE, (char *)&nb, sizeof(nb));;
+						if (ret == SOCKET_ERROR) {
+							ret = _SocketError();
+							closesocket(End->EndSocket);
+							End->EndSocket = INVALID_SOCKET;
+							free(addrstr);
+							LogError("setsockopt: %i", ret);
 							tmp = tmp->ai_next;
 							continue;
 						}
@@ -857,7 +894,7 @@ int main(int argc, char *argv[])
 
 	memset(&source, 0, sizeof(source));
 	memset(&dest, 0, sizeof(dest));
-	while (!_terminated) {
+	while (1) {
 		source.Type = _sourceMode;
 		source.AddressFamily = _sourceAF;
 		source.Address = _sourceAddress;
@@ -888,6 +925,9 @@ int main(int argc, char *argv[])
 					d[1].SourceSocket = dest.EndSocket;
 					d[1].DestSocket = source.EndSocket;
 #ifdef _WIN32
+					d[0].pShutdown = &d[0].Shutdown;
+					d[1].pShutdown = &d[0].Shutdown;
+					InterlockedExchange(d[0].pShutdown, 0);
 					DWORD threadId = 0;
 					HANDLE ths[2];;
 
