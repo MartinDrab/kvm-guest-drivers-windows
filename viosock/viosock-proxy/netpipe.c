@@ -493,7 +493,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							for (size_t i = 0; i < End->ListenCount; ++i)
 								FD_SET(End->ListenSockets[i], &fs);
 
-							ret = select(End->ListenSockets[End->ListenCount - 1] + 1, &fs, NULL, &fs, &tv);
+							ret = select(End->ListenSockets[End->ListenCount - 1] + 1, &fs, NULL, NULL, &tv);
 							if (ret > 0) {
 								ret = 0;
 								for (size_t i = 0; i < End->ListenCount; ++i) {
