@@ -429,7 +429,9 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							ret = listen(End->ListenSockets[index], SOMAXCONN);
 							if (ret == SOCKET_ERROR) {
 								ret = _SocketError();
+#ifdef _WIN32
 								WSACloseEvent(End->ListenEvents[index]);
+#endif
 								closesocket(End->ListenSockets[index]);
 								free(End->ListenAddresses[index]);
 								LogError("Error %i", ret);
@@ -489,9 +491,18 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 
 							FD_ZERO(&fs);
 							for (size_t i = 0; i < End->ListenCount; ++i)
-								FD_SET(listenSockets[i], &fs);
+								FD_SET(End->ListenSockets[i], &fs);
 
 							ret = select(End->ListenSockets[End->ListenCount - 1] + 1, &fs, NULL, &fs, &tv);
+							if (ret > 0) {
+								ret = 0;
+								for (size_t i = 0; i < End->ListenCount; ++i) {
+									if (FD_ISSET(End->ListenSockets[i], &fs)) {
+										ret = i + 1;
+										break;
+									}
+								}
+							}
 #endif
 							if (ret > 0) {
 								struct sockaddr_storage acceptAddr;
