@@ -11,9 +11,14 @@ typedef struct _CHANNEL_DATA {
 	char *DestAddress;
 	struct timeval Timeout;
 #ifdef _WIN32
+	OVERLAPPED SourceOverlapped;
+	void *SourceBuffer;
 	volatile LONG Shutdown;
 	volatile LONG *pShutdown;
 #endif
+	int DontCloseDestSocket : 1;
+	int SourcePipe : 1;
+	int DestPipe : 1;
 } CHANNEL_DATA, *PCHANNEL_DATA;
 
 typedef enum _ECommEndType {
@@ -50,6 +55,57 @@ static int _version = 0;
 static char *_logFile = NULL;
 
 
+PCHANNEL_DATA _ThreadContextAlloc(const char* SourceAddress, const char* DestAddress, SOCKET SourceSocket, SOCKET DestSocket)
+{
+	PCHANNEL_DATA ret = NULL;
+
+	ret = malloc(sizeof(CHANNEL_DATA));
+	if (ret == NULL) {
+		errno = ENOMEM;
+		goto Exit;
+	}
+
+	memset(ret, 0, sizeof(CHANNEL_DATA));
+	ret->Timeout.tv_sec = 5;
+	ret->Timeout.tv_usec = 0;
+	ret->SourceSocket = SourceSocket;
+	ret->DestSocket = DestSocket;
+	ret->SourceAddress = strdup(SourceAddress);
+	if (ret->SourceAddress == NULL) {
+		errno = ENOMEM;
+		goto FreeContext;
+	}
+
+	ret->DestAddress = strdup(DestAddress);
+	if (ret->DestAddress == NULL) {
+		errno = ENOMEM;
+		goto FreeSourceAddress;
+	}
+
+	goto Exit;
+FreeSourceAddress:
+	free(ret->SourceAddress);
+FreeContext:
+	free(ret);
+	ret = NULL;
+Exit:
+	return ret;
+}
+
+
+static void _ThreadContextFree(PCHANNEL_DATA Ctx)
+{
+	closesocket(Ctx->SourceSocket);
+	if (!Ctx->DontCloseDestSocket)
+		closesocket(Ctx->DestSocket);
+
+	free(Ctx->SourceAddress);
+	free(Ctx->DestAddress);
+	free(Ctx);
+
+	return;
+}
+
 
 static int _SocketError()
 {
@@ -69,20 +125,39 @@ static int _SocketError()
 }
 
 
-static int _StreamData(SOCKET Source, SOCKET Dest, uint32_t Flags)
+static int _StreamData(PCHANNEL_DATA Data)
 {
 	int ret = 0;
 	ssize_t len = 0;
 	char dataBuffer[4096];
 
-	len = recv(Source, dataBuffer, sizeof(dataBuffer), 0);
+	if (Data->SourcePipe) {
+#ifdef _WIN32
+		DWORD bytesRead = 0;
+
+		if (GetOverlappedResult(&Data->SourceOverlapped, &bytesRead, TRUE)) {
+			len = bytesRead;
+			memcpy(dataBuffer, Data->SourceBuffer, len);
+		} else len = -1;
+#endif
+	} else len = recv(Data->SourceSocket, dataBuffer, sizeof(dataBuffer), 0);
+	
 	if (len > 0) {
 		ret = len;
 		LogPacket("<<< %i bytes received", len);
 		while (len > 0) {
 			ssize_t tmp = 0;
 
-			tmp = send(Dest, dataBuffer, len, 0);
+			if (Data->DestPipe) {
+#ifdef _WIN32
+				DWORD bytesWritten = 0;
+
+				if (WriteFile(Data->DestSocket, dataBuffer, len, &bytesWritten, NULL)) {
+					tmp = bytesWritten;
+				} else tmp = -1;
+#endif
+			} else tmp = send(Data->DestSocket, dataBuffer, len, 0);
+			
 			if (tmp == -1) {
 				tmp = _SocketError();
 				if (tmp == EWOULDBLOCK) {
@@ -124,7 +199,14 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	LogInfo("Creating read event");
 	readEvent = WSACreateEvent();
 	if (readEvent != WSA_INVALID_EVENT) {
-		ret = WSAEventSelect(Data->SourceSocket, readEvent, FD_OOB | FD_CLOSE | FD_READ);
+		if (Data->SourcePipe) {
+			Data->SourceOverlapped.hEvent = readEvent;
+			Data->SourceBuffer = malloc(4096);
+			if (Data->SourceBuffer != NULL) {
+				memset(Data->SourceBuffer, 0, 4096);
+			} else ret = SOCKET_ERROR;
+		} else ret = WSAEventSelect(Data->SourceSocket, readEvent, FD_OOB | FD_CLOSE | FD_READ);
+		
 		if (ret == SOCKET_ERROR) {
 			ret = _SocketError();
 			WSACloseEvent(readEvent);
@@ -135,23 +217,39 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 		LogInfo("Starting to process the connection (%s --> %s)", Data->SourceAddress, Data->DestAddress);
 		do {
 #ifdef _WIN32
-			ret = WSAWaitForMultipleEvents(1, &readEvent, FALSE, tv.tv_sec*1000, TRUE);
-			switch (ret) {
-				case WSA_WAIT_EVENT_0: {
-					WSANETWORKEVENTS nes;
-
-					ret = 1;
-					memset(&nes, 0, sizeof(nes));
-					if (WSAEnumNetworkEvents(Data->SourceSocket, readEvent, &nes) == SOCKET_ERROR)
+			ret = 0;
+			if (Data->SourcePipe) {
+				if (!ReadFile((HANDLE)Data->SourceSocket, Data->SourceBuffer, 4096, NULL, &Data->SourceOverlapped)) {
+					ret = GetLastError();
+					if (ret == ERROR_IO_PENDING)
+						ret = 0;
+				
+					if (ret != 0) {
+						LogError("ReadFile: %i", ret);
 						ret = -1;
-				} break;
-				case WSA_WAIT_TIMEOUT:
-				case WSA_WAIT_IO_COMPLETION:
-					ret = 0;
-					break;
-				default:
-					ret = -1;
-					break;
+					}
+				}
+			}
+
+			if (ret == 0) {
+				ret = WSAWaitForMultipleEvents(1, &readEvent, FALSE, tv.tv_sec*1000, TRUE);
+				switch (ret) {
+					case WSA_WAIT_EVENT_0: {
+						WSANETWORKEVENTS nes;
+
+						ret = 1;
+						memset(&nes, 0, sizeof(nes));
+						if (WSAEnumNetworkEvents(Data->SourceSocket, readEvent, &nes) == SOCKET_ERROR)
+							ret = -1;
+					} break;
+					case WSA_WAIT_TIMEOUT:
+					case WSA_WAIT_IO_COMPLETION:
+						ret = 0;
+						break;
+					default:
+						ret = -1;
+						break;
+				}
 			}
 #else
 			FD_ZERO(&fs);
@@ -159,7 +257,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 			ret = select((int)Data->SourceSocket + 1, &fs, NULL, NULL, &tv);
 #endif
 			if (ret > 0) {
-				ret = _StreamData(Data->SourceSocket, Data->DestSocket, 0);
+				ret = _StreamData(Data);
 				switch (ret) {
 					case 0:
 						LogInfo("Connection closed");
@@ -183,11 +281,11 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 				ret = _SocketError();
 				if (errno == EINTR)
 					ret = 0;
-#ifdef _WIN32
+
 				if (ret == EWOULDBLOCK)
 					ret = 0;
-#endif
-				if (ret == 0)
+
+				if (ret != 0)
 					LogError("Error %i", ret);
 			}
 		} while (ret >= 0
@@ -197,24 +295,19 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 			);
 	
 #ifdef _WIN32
+		free(Data->SourceBuffer);
 		WSACloseEvent(readEvent);
 #endif
 	}
 
 	LogInfo("Shutting down the socket");
 	shutdown(Data->SourceSocket, SD_BOTH);
-	closesocket(Data->SourceSocket);
-	if (Data->SourceAddress != NULL)
-		free(Data->SourceAddress);
-
 #ifdef _WIN32
 	InterlockedIncrement(Data->pShutdown);
 #else
 	shutdown(Data->DestSocket, SD_BOTH);
-	closesocket(Data->DestSocket);
-	if (Data->DestAddress != NULL)
-		free(Data->DestAddress);
 #endif
+	_ThreadContextFree(Data);
 
 	LogInfo("Exitting");
 	return;
@@ -744,7 +837,6 @@ void usage(void)
 }
 
 
-
 int main(int argc, char *argv[])
 {
 	int ret = 0;
@@ -918,75 +1010,79 @@ int main(int argc, char *argv[])
 			dest.EndSocket = INVALID_SOCKET;
 			ret = _PrepareChannelEnd(&dest);
 			if (ret == 0) {
-				PCHANNEL_DATA d = NULL;
+				PCHANNEL_DATA d[2];
 
-				d = (PCHANNEL_DATA)malloc(sizeof(CHANNEL_DATA)*2);
-				if (d != NULL) {
-					d[0].Timeout.tv_sec = 5;
-					d[0].Timeout.tv_usec = 0;
-					d[0].SourceAddress = source.AcceptAddress;
-					d[0].DestAddress = dest.AcceptAddress;
-					d[0].SourceSocket = source.EndSocket;
-					d[0].DestSocket = dest.EndSocket;
-
-					d[1].Timeout.tv_sec = 5;
-					d[1].Timeout.tv_usec = 0;
-					d[1].SourceAddress = dest.AcceptAddress;
-					d[1].DestAddress = source.AcceptAddress;
-					d[1].SourceSocket = dest.EndSocket;
-					d[1].DestSocket = source.EndSocket;
+				d[0] = _ThreadContextAlloc(source.AcceptAddress, dest.AcceptAddress, source.EndSocket, dest.EndSocket);
+				if (d[0] != NULL) {
+					d[1] = _ThreadContextAlloc(dest.AcceptAddress, source.AcceptAddress, dest.EndSocket, source.EndSocket);
+					if (d[1] != NULL) {
+						d[0]->DontCloseDestSocket = 1;
+						d[1]->DontCloseDestSocket = 1;
 #ifdef _WIN32
-					d[0].pShutdown = &d[0].Shutdown;
-					d[1].pShutdown = &d[0].Shutdown;
-					InterlockedExchange(d[0].pShutdown, 0);
-					DWORD threadId = 0;
-					HANDLE ths[2];;
+						d[0]->pShutdown = &d[0]->Shutdown;
+						d[1]->pShutdown = &d[0]->Shutdown;
+						DWORD threadId = 0;
+						HANDLE ths[2];;
 
-					memset(ths, 0, sizeof(ths));
-					for (size_t i = 0; i < sizeof(ths)/sizeof(ths[0]); ++i) {
-						ths[i] = CreateThread(NULL, 0, _ChannelThreadWrapper, d + i, 0, &threadId);
-						if (ths[i] == NULL) {
-							ret = GetLastError();
-							for (size_t j = 0; j < i; ++i) {
-								shutdown(d[j].SourceSocket, SD_BOTH);
-								WaitForSingleObject(ths[j], INFINITE);
-								CloseHandle(ths[j]);
-							}
+						memset(ths, 0, sizeof(ths));
+						for (size_t i = 0; i < sizeof(ths)/sizeof(ths[0]); ++i) {
+							ths[i] = CreateThread(NULL, 0, _ChannelThreadWrapper, d[i], 0, &threadId);
+							if (ths[i] == NULL) {
+								ret = GetLastError();
+								shutdown(d[i]->SourceSocket, SD_BOTH);
+								for (size_t j = 0; j < i; ++i) {
+									WaitForSingleObject(ths[j], INFINITE);
+									CloseHandle(ths[j]);
+								}
 							
-							shutdown(d[i].SourceSocket, SD_BOTH);
-							closesocket(d[i].SourceSocket);
-							free(d);
-							break;
-						}
-					}
+								break;
+							}
 
-					if (ret == 0) {
-						for (size_t i = 0; i < sizeof(ths)/sizeof(ths[0]); ++i)
-							CloseHandle(ths[i]);
-					}
+							d[i] = NULL;
+						}
+
+						if (ret == 0) {
+							for (size_t i = 0; i < sizeof(ths)/sizeof(ths[0]); ++i)
+								CloseHandle(ths[i]);
+						}
 #else
-					for (size_t i = 0; i < 2; ++i) {
-						ret = fork();
-						if (ret > 0) {
-							ret = 0;
-						} else if (ret == 0) {
-							_ProcessChannel(d + i);
-							return 0;
+						for (size_t i = 0; i < 2; ++i) {
+							ret = fork();
+							if (ret > 0) {
+								ret = 0;
+							} else if (ret == 0) {
+								_ProcessChannel(d[i]);
+								return 0;
+							}
 						}
+#endif
+						if (d[1] != NULL)
+							_ThreadContextFree(d[1]);
 					}
 
-					close(d->DestSocket);
-					close(d->SourceSocket);
-					free(d);
-#endif
-				} else ret = ENOMEM;
+					if (d[0] != NULL)
+						_ThreadContextFree(d[0]);
+					
+					source.EndSocket = INVALID_SOCKET;
+					dest.EndSocket = INVALID_SOCKET;
+				}
 
-				if (ret != 0)
+				if (dest.EndSocket != INVALID_SOCKET)
 					closesocket(dest.EndSocket);
+			
+				if (dest.AcceptAddress != NULL) {
+					free(dest.AcceptAddress);
+					dest.AcceptAddress = NULL;
+				}
 			} else LogError("Failed to prepare the target channel: %u", ret);
 
-			if (ret != 0)
+			if (source.EndSocket != INVALID_SOCKET)
 				closesocket(source.EndSocket);
+
+			if (source.AcceptAddress != NULL) {
+				free(source.AcceptAddress);
+				source.AcceptAddress = NULL;
+			}
 		} else LogError("Failed to prepare the source channel: %u", ret);
 
 		sleep(_timeout);

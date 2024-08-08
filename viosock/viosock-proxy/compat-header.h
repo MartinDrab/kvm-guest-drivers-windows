@@ -45,6 +45,7 @@ typedef int ADDRESS_FAMILY;
 typedef int ssize_t;
 #define poll(a, b, c)			WSAPoll(a, b, c)
 #define sleep(t)				Sleep((t) * 1000)
+#define strdup                  _strdup
 
 struct sockaddr_un {
     ADDRESS_FAMILY sun_family;               /* AF_UNIX */
