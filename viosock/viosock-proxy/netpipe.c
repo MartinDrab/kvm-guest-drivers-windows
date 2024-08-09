@@ -4,6 +4,11 @@
 #include "netpipe.h"
 
 
+typedef struct _PIPE_ENDS {
+	HANDLE ReadEnd;
+	HANDLE WriteEnd;
+} PIPE_ENDS, *PPIPE_ENDS;
+
 typedef struct _CHANNEL_DATA {
 	SOCKET SourceSocket;
 	SOCKET DestSocket;
@@ -12,6 +17,7 @@ typedef struct _CHANNEL_DATA {
 	struct timeval Timeout;
 #ifdef _WIN32
 	OVERLAPPED SourceOverlapped;
+	HANDLE hProcess;
 	void *SourceBuffer;
 	volatile LONG Shutdown;
 	volatile LONG *pShutdown;
@@ -24,6 +30,7 @@ typedef struct _CHANNEL_DATA {
 typedef enum _ECommEndType {
 	cetConnect,
 	cetAccept,
+	cetProcess,
 } ECommEndType, *PECommEndType;
 
 #define MAX_LISTEN_COUNT					32
@@ -39,6 +46,9 @@ typedef struct _CHANNEL_END {
 	char *ListenAddresses[MAX_LISTEN_COUNT];
 #ifdef _WIN32
 	WSAEVENT ListenEvents[MAX_LISTEN_COUNT];
+	HANDLE hProcess;
+	PIPE_ENDS StdIn;
+	PIPE_ENDS StdOut;
 #endif
 } CHANNEL_END, *PCHANNEL_END;
 
@@ -107,6 +117,82 @@ static void _ThreadContextFree(PCHANNEL_DATA Ctx)
 }
 
 
+#ifdef _WIN32
+
+static BOOL _CreateAsynchronousPipe(PPIPE_ENDS Pipe)
+{
+	DWORD dwError;
+	HANDLE ReadPipeHandle, WritePipeHandle;
+	wchar_t PipeNameBuffer[MAX_PATH];
+	static volatile LONG PipeSerialNumber;
+
+	swprintf(PipeNameBuffer, sizeof(PipeNameBuffer)/sizeof(PipeNameBuffer[0]), L"\\\\.\\Pipe\\RemoteExeAnon.%x.%x", GetCurrentProcessId(), InterlockedIncrement(&PipeSerialNumber));
+	ReadPipeHandle = CreateNamedPipeW(PipeNameBuffer, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 120 * 1000, NULL);
+	if (!ReadPipeHandle) {
+		return FALSE;
+	}
+
+	WritePipeHandle = CreateFileW(PipeNameBuffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	if (WritePipeHandle == INVALID_HANDLE_VALUE) {
+		dwError = GetLastError();
+		CloseHandle(ReadPipeHandle);
+		SetLastError(dwError);
+		return FALSE;
+	}
+
+	Pipe->ReadEnd = ReadPipeHandle;
+	Pipe->WriteEnd = WritePipeHandle;
+	
+	return TRUE;
+}
+
+
+static BOOL _CreateStdPipes(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
+{
+	BOOL ret = FALSE;
+	DWORD err = ERROR_GEN_FAILURE;
+
+	ret = _CreateAsynchronousPipe(StdIn);
+	if (!ret) {
+		err = GetLastError();
+		goto Exit;
+	}
+
+	ret = _CreateAsynchronousPipe(StdOut);
+	if (!ret) {
+		err = GetLastError();
+		goto CloseIn;
+	}
+
+	ret = SetHandleInformation(StdIn->ReadEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+	if (!ret) {
+		err = GetLastError();
+		goto CloseOut;
+	}
+
+	ret = SetHandleInformation(StdOut->WriteEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+	if (!ret) {
+		err = GetLastError();
+		goto CloseOut;
+	}
+
+	goto Exit;
+CloseOut:
+	CloseHandle(StdOut->ReadEnd);
+	CloseHandle(StdOut->WriteEnd);
+CloseIn:
+	CloseHandle(StdIn->ReadEnd);
+	CloseHandle(StdIn->WriteEnd);
+Exit:
+	if (!ret)
+		SetLastError(err);
+
+	return ret;
+}
+
+#endif
+
+
 static int _SocketError()
 {
 	int ret = 0;
@@ -135,7 +221,7 @@ static int _StreamData(PCHANNEL_DATA Data)
 #ifdef _WIN32
 		DWORD bytesRead = 0;
 
-		if (GetOverlappedResult(&Data->SourceOverlapped, &bytesRead, TRUE)) {
+		if (GetOverlappedResult((HANDLE)Data->SourceSocket, &Data->SourceOverlapped, &bytesRead, TRUE)) {
 			len = bytesRead;
 			memcpy(dataBuffer, Data->SourceBuffer, len);
 		} else len = -1;
@@ -152,7 +238,7 @@ static int _StreamData(PCHANNEL_DATA Data)
 #ifdef _WIN32
 				DWORD bytesWritten = 0;
 
-				if (WriteFile(Data->DestSocket, dataBuffer, len, &bytesWritten, NULL)) {
+				if (WriteFile((HANDLE)Data->DestSocket, dataBuffer, len, &bytesWritten, NULL)) {
 					tmp = bytesWritten;
 				} else tmp = -1;
 #endif
@@ -304,6 +390,8 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	shutdown(Data->SourceSocket, SD_BOTH);
 #ifdef _WIN32
 	InterlockedIncrement(Data->pShutdown);
+	if (Data->hProcess != NULL)
+		CloseHandle(Data->hProcess);
 #else
 	shutdown(Data->DestSocket, SD_BOTH);
 #endif
@@ -380,65 +468,67 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 	struct sockaddr_un *unixAddress = NULL;
 	struct sockaddr_vm *vm = NULL;
 
-	switch (End->AddressFamily) {
-		case AF_UNSPEC:
-		case AF_INET:
-		case AF_INET6: {
-			char *service = NULL;
+	if (End->Type != cetProcess) {
+		switch (End->AddressFamily) {
+			case AF_UNSPEC:
+			case AF_INET:
+			case AF_INET6: {
+				char *service = NULL;
 			
-			memset(&hints, 0, sizeof(hints));
-			hints.ai_family = End->AddressFamily;
-			hints.ai_socktype = SOCK_STREAM;
-			hints.ai_protocol = IPPROTO_TCP;
-			service = End->Address + strlen(End->Address);
-			while (service != End->Address && *service != ':')
-				--service;
+				memset(&hints, 0, sizeof(hints));
+				hints.ai_family = End->AddressFamily;
+				hints.ai_socktype = SOCK_STREAM;
+				hints.ai_protocol = IPPROTO_TCP;
+				service = End->Address + strlen(End->Address);
+				while (service != End->Address && *service != ':')
+					--service;
 
 
-			if (service != End->Address) {
-				*service = '\0';
-				++service;
-			} else service = NULL;
+				if (service != End->Address) {
+					*service = '\0';
+					++service;
+				} else service = NULL;
 
-			ret = getaddrinfo(End->Address, service, &hints, &addrs);
-			if (service != NULL) {
-				--service;
-				*service = ':';
-			}
-
-			if (ret != 0)
-				LogError("getaddrinfo: %i", ret);
-		} break;
-		case AF_UNIX:
-			unixAddress = (struct sockaddr_un *)malloc(sizeof(struct sockaddr_un));
-			if (unixAddress != NULL) {
-				memset(unixAddress, 0, sizeof(struct sockaddr_un));
-				unixAddress->sun_family = AF_UNIX;
-				memcpy(unixAddress->sun_path, End->Address, strlen(End->Address));
-				genAddr = (struct sockaddr *)unixAddress;
-				genAddrLen = SUN_LEN(unixAddress);
-			} else ret = ENOMEM;
-			break;
-		default: {
-			ADDRESS_FAMILY af = AF_UNSPEC;
-
-			af = End->AddressFamily;
-			vm = (struct sockaddr_vm *)malloc(sizeof(struct sockaddr_vm));
-			if (vm != NULL) {
-				char *tmp = NULL;
-				memset(vm, 0, sizeof(struct sockaddr_vm));
-				vm->svm_family = End->AddressFamily;
-				vm->svm_cid = strtoul(End->Address, &tmp, 0);
-				if (tmp != NULL && *tmp == ':') {
-					vm->svm_port = strtoul(tmp + 1, &tmp, 0);
-					genAddr = (struct sockaddr*)vm;
-					genAddrLen = sizeof(struct sockaddr_vm);
-				} else {
-					ret = EINVAL;
-					LogError("Invalid AF_VSOCK address format");
+				ret = getaddrinfo(End->Address, service, &hints, &addrs);
+				if (service != NULL) {
+					--service;
+					*service = ':';
 				}
-			} else ret = ENOMEM;
-		} break;
+
+				if (ret != 0)
+					LogError("getaddrinfo: %i", ret);
+			} break;
+			case AF_UNIX:
+				unixAddress = (struct sockaddr_un *)malloc(sizeof(struct sockaddr_un));
+				if (unixAddress != NULL) {
+					memset(unixAddress, 0, sizeof(struct sockaddr_un));
+					unixAddress->sun_family = AF_UNIX;
+					memcpy(unixAddress->sun_path, End->Address, strlen(End->Address));
+					genAddr = (struct sockaddr *)unixAddress;
+					genAddrLen = SUN_LEN(unixAddress);
+				} else ret = ENOMEM;
+				break;
+			default: {
+				ADDRESS_FAMILY af = AF_UNSPEC;
+
+				af = End->AddressFamily;
+				vm = (struct sockaddr_vm *)malloc(sizeof(struct sockaddr_vm));
+				if (vm != NULL) {
+					char *tmp = NULL;
+					memset(vm, 0, sizeof(struct sockaddr_vm));
+					vm->svm_family = End->AddressFamily;
+					vm->svm_cid = strtoul(End->Address, &tmp, 0);
+					if (tmp != NULL && *tmp == ':') {
+						vm->svm_port = strtoul(tmp + 1, &tmp, 0);
+						genAddr = (struct sockaddr*)vm;
+						genAddrLen = sizeof(struct sockaddr_vm);
+					} else {
+						ret = EINVAL;
+						LogError("Invalid AF_VSOCK address format");
+					}
+				} else ret = ENOMEM;
+			} break;
+		}
 	}
 
 	if (ret == 0) {
@@ -712,6 +802,39 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 					}
 
 				} break;
+#ifdef _WIN32
+				case cetProcess: {
+					if (_CreateStdPipes(&End->StdIn, &End->StdOut)) {
+						STARTUPINFOA si;
+						PROCESS_INFORMATION pi;
+
+						memset(&si, 0, sizeof(si));
+						si.cb = sizeof(si);
+						si.dwFlags = STARTF_USESTDHANDLES;
+						si.hStdInput = End->StdIn.ReadEnd;
+						si.hStdOutput = End->StdOut.WriteEnd;
+						memset(&pi, 0, sizeof(pi));
+						if (!CreateProcessA(NULL, End->Address, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+							ret = GetLastError();
+
+						if (ret == 0) {
+							CloseHandle(pi.hThread);
+							End->hProcess = pi.hProcess;
+							CloseHandle(End->StdIn.ReadEnd);
+							End->StdIn.ReadEnd = NULL;
+							CloseHandle(End->StdOut.WriteEnd);
+							End->StdOut.WriteEnd = NULL;
+						}
+
+						if (ret != 0) {
+							CloseHandle(End->StdIn.ReadEnd);
+							CloseHandle(End->StdIn.WriteEnd);
+							CloseHandle(End->StdOut.ReadEnd);
+							CloseHandle(End->StdOut.WriteEnd);
+						}
+					} else ret = _SocketError();
+				} break;
+#endif
 			}
 		}
 
@@ -860,7 +983,17 @@ int main(int argc, char *argv[])
 	} else if (strcmp(mode, "ca") == 0) {
 		_sourceMode = cetConnect;
 		_targetMode = cetAccept;
-	} else {
+	}
+#ifdef _WIN32
+	else if(strcmp(mode, "ap") == 0) {
+		_sourceMode = cetAccept;
+		_targetMode = cetProcess;
+	} else if (strcmp(mode, "cp") == 0) {
+		_sourceMode = cetConnect;
+		_targetMode = cetProcess;
+	}
+#endif
+	else {
 		fprintf(stderr, "Unknown operating mode \"%s\"\n", mode);
 		return -2;
 	}
@@ -903,11 +1036,13 @@ int main(int argc, char *argv[])
 				break;
 			case otSourceHost:
 				_sourceAddress = *arg;
-				_ProcessAddress(*arg, &_sourceAddress, &_sourceAF);
+				if (_sourceMode != cetProcess)
+					_ProcessAddress(*arg, &_sourceAddress, &_sourceAF);
 				break;
 			case otTargetHost:
 				_targetAddress = *arg;
-				_ProcessAddress(*arg, &_targetAddress, &_destAF);
+				if (_targetMode != cetProcess)
+					_ProcessAddress(*arg, &_targetAddress, &_destAF);
 				break;
 			case otLogError:
 				_loggingFlags |= LOG_FLAG_ERROR;
@@ -1019,6 +1154,14 @@ int main(int argc, char *argv[])
 						d[0]->DontCloseDestSocket = 1;
 						d[1]->DontCloseDestSocket = 1;
 #ifdef _WIN32
+						if (dest.Type == cetProcess) {
+							d[0]->DestSocket = (SOCKET)dest.StdIn.WriteEnd;
+							d[0]->DestPipe = 1;
+							d[0]->DontCloseDestSocket = 0;
+							d[1]->SourceSocket = (SOCKET)dest.StdOut.ReadEnd;
+							d[1]->SourcePipe = 1;
+						}
+
 						d[0]->pShutdown = &d[0]->Shutdown;
 						d[1]->pShutdown = &d[0]->Shutdown;
 						DWORD threadId = 0;
