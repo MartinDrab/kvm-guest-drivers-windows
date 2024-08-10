@@ -3,11 +3,14 @@
 #include "logging.h"
 #include "netpipe.h"
 
+#ifdef _WIN32
 
 typedef struct _PIPE_ENDS {
 	HANDLE ReadEnd;
 	HANDLE WriteEnd;
 } PIPE_ENDS, *PPIPE_ENDS;
+
+#endif
 
 typedef struct _CHANNEL_DATA {
 	SOCKET SourceSocket;
@@ -17,7 +20,6 @@ typedef struct _CHANNEL_DATA {
 	struct timeval Timeout;
 #ifdef _WIN32
 	OVERLAPPED SourceOverlapped;
-	HANDLE hProcess;
 	void *SourceBuffer;
 	volatile LONG Shutdown;
 	volatile LONG *pShutdown;
@@ -105,9 +107,19 @@ Exit:
 
 static void _ThreadContextFree(PCHANNEL_DATA Ctx)
 {
-	closesocket(Ctx->SourceSocket);
-	if (!Ctx->DontCloseDestSocket)
-		closesocket(Ctx->DestSocket);
+	if (!Ctx->SourcePipe)
+		closesocket(Ctx->SourceSocket);
+#ifdef _WIN32
+	else CloseHandle((HANDLE)Ctx->SourceSocket);
+#endif
+
+	if (!Ctx->DontCloseDestSocket) {
+		if (!Ctx->DestPipe)
+			closesocket(Ctx->DestSocket);
+#ifdef _WIN32
+		else CloseHandle((HANDLE)Ctx->DestSocket);
+#endif
+	}
 
 	free(Ctx->SourceAddress);
 	free(Ctx->DestAddress);
@@ -122,17 +134,18 @@ static void _ThreadContextFree(PCHANNEL_DATA Ctx)
 static BOOL _CreateAsynchronousPipe(PPIPE_ENDS Pipe)
 {
 	DWORD dwError;
-	HANDLE ReadPipeHandle, WritePipeHandle;
+	HANDLE ReadPipeHandle = NULL;
+	HANDLE WritePipeHandle = NULL;
 	wchar_t PipeNameBuffer[MAX_PATH];
 	static volatile LONG PipeSerialNumber;
 
 	swprintf(PipeNameBuffer, sizeof(PipeNameBuffer)/sizeof(PipeNameBuffer[0]), L"\\\\.\\Pipe\\RemoteExeAnon.%x.%x", GetCurrentProcessId(), InterlockedIncrement(&PipeSerialNumber));
-	ReadPipeHandle = CreateNamedPipeW(PipeNameBuffer, PIPE_ACCESS_INBOUND, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 120 * 1000, NULL);
-	if (!ReadPipeHandle) {
+	ReadPipeHandle = CreateNamedPipeW(PipeNameBuffer, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 120 * 1000, NULL);
+	if (ReadPipeHandle == INVALID_HANDLE_VALUE) {
 		return FALSE;
 	}
 
-	WritePipeHandle = CreateFileW(PipeNameBuffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+	WritePipeHandle = CreateFileW(PipeNameBuffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
 	if (WritePipeHandle == INVALID_HANDLE_VALUE) {
 		dwError = GetLastError();
 		CloseHandle(ReadPipeHandle);
@@ -142,8 +155,24 @@ static BOOL _CreateAsynchronousPipe(PPIPE_ENDS Pipe)
 
 	Pipe->ReadEnd = ReadPipeHandle;
 	Pipe->WriteEnd = WritePipeHandle;
-	
+
 	return TRUE;
+}
+
+
+static void _CloseAsynchronousPipe(PPIPE_ENDS Pipe)
+{
+	if (Pipe->ReadEnd != NULL) {
+		CloseHandle(Pipe->ReadEnd);
+		Pipe->ReadEnd = NULL;
+	}
+
+	if (Pipe->WriteEnd!= NULL) {
+		CloseHandle(Pipe->WriteEnd);
+		Pipe->WriteEnd = NULL;
+	}
+
+	return;
 }
 
 
@@ -178,17 +207,32 @@ static BOOL _CreateStdPipes(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
 
 	goto Exit;
 CloseOut:
-	CloseHandle(StdOut->ReadEnd);
-	CloseHandle(StdOut->WriteEnd);
+	_CloseAsynchronousPipe(StdOut);
 CloseIn:
-	CloseHandle(StdIn->ReadEnd);
-	CloseHandle(StdIn->WriteEnd);
+	_CloseAsynchronousPipe(StdIn);
 Exit:
 	if (!ret)
 		SetLastError(err);
 
 	return ret;
 }
+
+
+static void _CloseDistantEnds(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
+{
+	if (StdIn->ReadEnd != NULL) {
+		CloseHandle(StdIn->ReadEnd);
+		StdIn->ReadEnd = NULL;
+	}
+
+	if (StdOut->WriteEnd != NULL) {
+		CloseHandle(StdOut->WriteEnd);
+		StdOut->WriteEnd = NULL;
+	}
+
+	return;
+}
+
 
 #endif
 
@@ -224,7 +268,13 @@ static int _StreamData(PCHANNEL_DATA Data)
 		if (GetOverlappedResult((HANDLE)Data->SourceSocket, &Data->SourceOverlapped, &bytesRead, TRUE)) {
 			len = bytesRead;
 			memcpy(dataBuffer, Data->SourceBuffer, len);
-		} else len = -1;
+		} else {
+			len = 0;
+			if (_SocketError() != ERROR_BROKEN_PIPE) {
+				len = -1;
+				LogError("GetOverlappedResult: %u", GetLastError());
+			}
+		}
 #endif
 	} else len = recv(Data->SourceSocket, dataBuffer, sizeof(dataBuffer), 0);
 	
@@ -240,7 +290,10 @@ static int _StreamData(PCHANNEL_DATA Data)
 
 				if (WriteFile((HANDLE)Data->DestSocket, dataBuffer, len, &bytesWritten, NULL)) {
 					tmp = bytesWritten;
-				} else tmp = -1;
+				} else {
+					tmp = -1;
+					LogError("WriteFile: %u", GetLastError());
+				}
 #endif
 			} else tmp = send(Data->DestSocket, dataBuffer, len, 0);
 			
@@ -304,7 +357,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 		do {
 #ifdef _WIN32
 			ret = 0;
-			if (Data->SourcePipe) {
+			if (Data->SourcePipe) {				
 				if (!ReadFile((HANDLE)Data->SourceSocket, Data->SourceBuffer, 4096, NULL, &Data->SourceOverlapped)) {
 					ret = GetLastError();
 					if (ret == ERROR_IO_PENDING)
@@ -321,12 +374,16 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 				ret = WSAWaitForMultipleEvents(1, &readEvent, FALSE, tv.tv_sec*1000, TRUE);
 				switch (ret) {
 					case WSA_WAIT_EVENT_0: {
-						WSANETWORKEVENTS nes;
-
 						ret = 1;
-						memset(&nes, 0, sizeof(nes));
-						if (WSAEnumNetworkEvents(Data->SourceSocket, readEvent, &nes) == SOCKET_ERROR)
-							ret = -1;
+						if (!Data->SourcePipe) {
+							WSANETWORKEVENTS nes;
+
+							memset(&nes, 0, sizeof(nes));
+							if (WSAEnumNetworkEvents(Data->SourceSocket, readEvent, &nes) == SOCKET_ERROR) {
+								ret = -1;
+								LogError("WSAEnumNetworkEvents: %i", _SocketError());
+							}
+						}
 					} break;
 					case WSA_WAIT_TIMEOUT:
 					case WSA_WAIT_IO_COMPLETION:
@@ -371,8 +428,10 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 				if (ret == EWOULDBLOCK)
 					ret = 0;
 
-				if (ret != 0)
+				if (ret != 0) {
 					LogError("Error %i", ret);
+					ret = -1;
+				}
 			}
 		} while (ret >= 0
 #ifdef _WIN32
@@ -387,13 +446,13 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	}
 
 	LogInfo("Shutting down the socket");
-	shutdown(Data->SourceSocket, SD_BOTH);
+	if (!Data->SourcePipe)
+		shutdown(Data->SourceSocket, SD_BOTH);
 #ifdef _WIN32
 	InterlockedIncrement(Data->pShutdown);
-	if (Data->hProcess != NULL)
-		CloseHandle(Data->hProcess);
 #else
-	shutdown(Data->DestSocket, SD_BOTH);
+	if (!Data->DestPipe)
+		shutdown(Data->DestSocket, SD_BOTH);
 #endif
 	_ThreadContextFree(Data);
 
@@ -804,33 +863,33 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 				} break;
 #ifdef _WIN32
 				case cetProcess: {
+					LogInfo("Creating stdin/stdout pipes...");
 					if (_CreateStdPipes(&End->StdIn, &End->StdOut)) {
-						STARTUPINFOA si;
-						PROCESS_INFORMATION pi;
+						End->AcceptAddress = strdup(End->Address);
+						if (End->AcceptAddress != NULL) {
+							STARTUPINFOA si;
+							PROCESS_INFORMATION pi;
 
-						memset(&si, 0, sizeof(si));
-						si.cb = sizeof(si);
-						si.dwFlags = STARTF_USESTDHANDLES;
-						si.hStdInput = End->StdIn.ReadEnd;
-						si.hStdOutput = End->StdOut.WriteEnd;
-						memset(&pi, 0, sizeof(pi));
-						if (!CreateProcessA(NULL, End->Address, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
-							ret = GetLastError();
+							LogInfo("Running %s", End->AcceptAddress);
+							memset(&si, 0, sizeof(si));
+							si.cb = sizeof(si);
+							si.dwFlags = STARTF_USESTDHANDLES;
+							si.hStdInput = End->StdIn.ReadEnd;
+							si.hStdOutput = End->StdOut.WriteEnd;
+							memset(&pi, 0, sizeof(pi));
+							if (!CreateProcessA(NULL, End->AcceptAddress, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+								ret = GetLastError();
 
-						if (ret == 0) {
-							CloseHandle(pi.hThread);
-							End->hProcess = pi.hProcess;
-							CloseHandle(End->StdIn.ReadEnd);
-							End->StdIn.ReadEnd = NULL;
-							CloseHandle(End->StdOut.WriteEnd);
-							End->StdOut.WriteEnd = NULL;
-						}
+							if (ret == 0) {
+								CloseHandle(pi.hThread);
+								CloseHandle(pi.hProcess);
+								_CloseDistantEnds(&End->StdIn, &End->StdOut);
+							}
+						} else ret = ENOMEM;
 
 						if (ret != 0) {
-							CloseHandle(End->StdIn.ReadEnd);
-							CloseHandle(End->StdIn.WriteEnd);
-							CloseHandle(End->StdOut.ReadEnd);
-							CloseHandle(End->StdOut.WriteEnd);
+							_CloseAsynchronousPipe(&End->StdIn);
+							_CloseAsynchronousPipe(&End->StdOut);
 						}
 					} else ret = _SocketError();
 				} break;
@@ -1157,8 +1216,10 @@ int main(int argc, char *argv[])
 						if (dest.Type == cetProcess) {
 							d[0]->DestSocket = (SOCKET)dest.StdIn.WriteEnd;
 							d[0]->DestPipe = 1;
+							dest.StdIn.WriteEnd = NULL;
 							d[0]->DontCloseDestSocket = 0;
 							d[1]->SourceSocket = (SOCKET)dest.StdOut.ReadEnd;
+							dest.StdOut.ReadEnd = NULL;
 							d[1]->SourcePipe = 1;
 						}
 
@@ -1172,7 +1233,10 @@ int main(int argc, char *argv[])
 							ths[i] = CreateThread(NULL, 0, _ChannelThreadWrapper, d[i], 0, &threadId);
 							if (ths[i] == NULL) {
 								ret = GetLastError();
-								shutdown(d[i]->SourceSocket, SD_BOTH);
+								if (!d[i]->SourcePipe)
+									shutdown(d[i]->SourceSocket, SD_BOTH);
+								else CloseHandle((HANDLE)d[i]->SourceSocket);
+
 								for (size_t j = 0; j < i; ++i) {
 									WaitForSingleObject(ths[j], INFINITE);
 									CloseHandle(ths[j]);
@@ -1217,6 +1281,9 @@ int main(int argc, char *argv[])
 					free(dest.AcceptAddress);
 					dest.AcceptAddress = NULL;
 				}
+
+				_CloseAsynchronousPipe(&dest.StdIn);
+				_CloseAsynchronousPipe(&dest.StdOut);
 			} else LogError("Failed to prepare the target channel: %u", ret);
 
 			if (source.EndSocket != INVALID_SOCKET)
