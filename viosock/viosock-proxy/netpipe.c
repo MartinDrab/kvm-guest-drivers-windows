@@ -51,6 +51,7 @@ typedef struct _CHANNEL_END {
 	HANDLE hProcess;
 	PIPE_ENDS StdIn;
 	PIPE_ENDS StdOut;
+	PIPE_ENDS StdErr;
 #endif
 } CHANNEL_END, *PCHANNEL_END;
 
@@ -176,7 +177,7 @@ static void _CloseAsynchronousPipe(PPIPE_ENDS Pipe)
 }
 
 
-static BOOL _CreateStdPipes(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
+static BOOL _CreateStdPipes(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut, PPIPE_ENDS StdErr)
 {
 	BOOL ret = FALSE;
 	DWORD err = ERROR_GEN_FAILURE;
@@ -193,19 +194,33 @@ static BOOL _CreateStdPipes(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
 		goto CloseIn;
 	}
 
-	ret = SetHandleInformation(StdIn->ReadEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+	ret = _CreateAsynchronousPipe(StdErr);
 	if (!ret) {
 		err = GetLastError();
 		goto CloseOut;
+	}
+
+	ret = SetHandleInformation(StdIn->ReadEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+	if (!ret) {
+		err = GetLastError();
+		goto CloseErr;
 	}
 
 	ret = SetHandleInformation(StdOut->WriteEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
 	if (!ret) {
 		err = GetLastError();
-		goto CloseOut;
+		goto CloseErr;
+	}
+
+	ret = SetHandleInformation(StdErr->WriteEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
+	if (!ret) {
+		err = GetLastError();
+		goto CloseErr;
 	}
 
 	goto Exit;
+CloseErr:
+	_CloseAsynchronousPipe(StdErr);
 CloseOut:
 	_CloseAsynchronousPipe(StdOut);
 CloseIn:
@@ -218,7 +233,7 @@ Exit:
 }
 
 
-static void _CloseDistantEnds(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
+static void _CloseDistantEnds(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut, PPIPE_ENDS StdErr)
 {
 	if (StdIn->ReadEnd != NULL) {
 		CloseHandle(StdIn->ReadEnd);
@@ -230,7 +245,125 @@ static void _CloseDistantEnds(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut)
 		StdOut->WriteEnd = NULL;
 	}
 
+	if (StdErr->WriteEnd != NULL) {
+		CloseHandle(StdErr->WriteEnd);
+		StdErr->WriteEnd = NULL;
+	}
+
 	return;
+}
+
+
+typedef struct _STDERR_THREAD_CONTEXT {
+	HANDLE hProcess;
+	HANDLE hEvent;
+	HANDLE hPipe;
+} STDERR_THREAD_CONTEXT, *PSTDERR_THREAD_CONTEXT;
+
+
+static DWORD WINAPI _StdErrThreadRoutine(PVOID Context)
+{
+	OVERLAPPED o;
+	DWORD ret = 0;
+	char buffer[2049];
+	DWORD bytesTransferred = 0;
+	PSTDERR_THREAD_CONTEXT ctx = (PSTDERR_THREAD_CONTEXT)Context;
+
+	memset(&o, 0, sizeof(o));
+	o.hEvent = ctx->hEvent;
+	while (ret == 0) {
+		memset(buffer, 0, sizeof(buffer));
+		if (!ReadFile(ctx->hPipe, buffer, sizeof(buffer) - 1, NULL, &o)) {
+			ret = GetLastError();
+			if (ret == ERROR_IO_PENDING)
+				ret = 0;
+		
+			if (ret == ERROR_BROKEN_PIPE) {
+				ret = 0;
+				break;
+			}
+		}
+
+		if (ret != 0) {
+			LogError("STDERR: ReadFile: %u", ret);
+			break;
+		}
+
+		ret = WaitForSingleObject(o.hEvent, INFINITE);
+		switch (ret) {
+			case WAIT_OBJECT_0: {
+				if (!GetOverlappedResult(ctx->hPipe, &o, &bytesTransferred, TRUE)) {
+					ret = GetLastError();
+					if (ret != ERROR_BROKEN_PIPE)
+						LogError("STDERR: GetOverlappedResult: %u", ret);
+					
+					break;
+				}
+
+				LogInfo("STDERR (%u): %s", bytesTransferred, buffer);
+			} break;
+			default:
+				ret = GetLastError();
+				LogError("STDERR: WaitForSingleObject: %u", ret);
+				break;
+		}
+	}
+
+	if (ret == ERROR_BROKEN_PIPE)
+		ret = 0;
+
+	if (ret != 0) {
+		LogError("STDERR: Terminating the process with error %u", ret);
+		TerminateProcess(ctx->hProcess, ret);
+	}
+
+	CloseHandle(ctx->hProcess);
+	CloseHandle(ctx->hEvent);
+	CloseHandle(ctx->hPipe);
+	free(ctx);
+
+	return ret;
+}
+
+
+static DWORD StdErrThreadCreate(HANDLE hProcess, HANDLE hPipe)
+{
+	DWORD ret = 0;
+	DWORD tid = 0;
+	HANDLE hThread = NULL;
+	PSTDERR_THREAD_CONTEXT ctx = NULL;
+
+	ctx = malloc(sizeof(STDERR_THREAD_CONTEXT));
+	if (ctx == NULL) {
+		ret = ERROR_NOT_ENOUGH_MEMORY;
+		goto Exit;
+	}
+
+	memset(ctx, 0, sizeof(STDERR_THREAD_CONTEXT));
+	ctx->hPipe = hPipe;
+	ctx->hProcess = hProcess;
+	ctx->hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+	if (ctx->hEvent == NULL) {
+		ret = GetLastError();
+		goto FreeCtx;
+	}
+
+	hThread = CreateThread(NULL, 0, _StdErrThreadRoutine, ctx, 0, &tid);
+	if (hThread == NULL) {
+		ret = GetLastError();
+		goto CloseEvent;
+	}
+
+	CloseHandle(hThread);
+	ctx = NULL;
+CloseEvent:
+	if (ctx != NULL)
+		CloseHandle(ctx->hEvent);
+FreeCtx:
+	if (ctx != NULL)
+		free(ctx);
+Exit:
+	return ret;
 }
 
 
@@ -864,7 +997,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 #ifdef _WIN32
 				case cetProcess: {
 					LogInfo("Creating stdin/stdout pipes...");
-					if (_CreateStdPipes(&End->StdIn, &End->StdOut)) {
+					if (_CreateStdPipes(&End->StdIn, &End->StdOut, &End->StdErr)) {
 						End->AcceptAddress = strdup(End->Address);
 						if (End->AcceptAddress != NULL) {
 							STARTUPINFOA si;
@@ -876,18 +1009,27 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							si.dwFlags = STARTF_USESTDHANDLES;
 							si.hStdInput = End->StdIn.ReadEnd;
 							si.hStdOutput = End->StdOut.WriteEnd;
+							si.hStdError = End->StdErr.WriteEnd;
 							memset(&pi, 0, sizeof(pi));
 							if (!CreateProcessA(NULL, End->AcceptAddress, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
 								ret = GetLastError();
 
 							if (ret == 0) {
+								_CloseDistantEnds(&End->StdIn, &End->StdOut, &End->StdErr);
 								CloseHandle(pi.hThread);
-								CloseHandle(pi.hProcess);
-								_CloseDistantEnds(&End->StdIn, &End->StdOut);
+								ret = StdErrThreadCreate(pi.hProcess, End->StdErr.ReadEnd);
+								if (ret == 0)
+									End->StdErr.ReadEnd = NULL;
+
+								if (ret != 0) {
+									TerminateProcess(pi.hProcess, ret);
+									CloseHandle(pi.hProcess);
+								}
 							}
 						} else ret = ENOMEM;
 
 						if (ret != 0) {
+							_CloseAsynchronousPipe(&End->StdErr);
 							_CloseAsynchronousPipe(&End->StdIn);
 							_CloseAsynchronousPipe(&End->StdOut);
 						}
