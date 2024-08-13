@@ -67,6 +67,52 @@ static int _help = 0;
 static int _version = 0;
 static char *_logFile = NULL;
 
+#ifdef _WIN32
+
+static DWORD _AdjustPrivileges(HANDLE hProcess)
+{
+	DWORD ret = 0;
+	HANDLE hToken = 0;
+	const wchar_t *privs[] = {
+		SE_BACKUP_NAME,
+		SE_RESTORE_NAME,
+		SE_TCB_NAME,
+		SE_ASSIGNPRIMARYTOKEN_NAME,
+		SE_IMPERSONATE_NAME,
+	};
+
+	if (!OpenProcessToken(hProcess, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
+		ret = GetLastError();
+		LogError("OpenProcessToken: %u", ret);
+		goto Exit;
+	}
+
+	for (size_t i = 0; i < sizeof(privs) / sizeof(privs[0]); ++i) {
+		TOKEN_PRIVILEGES p;
+
+		memset(&p, 0, sizeof(p));
+		p.PrivilegeCount = 1;
+		p.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
+		if (!LookupPrivilegeValueW(NULL, privs[i], &p.Privileges[0].Luid)) {
+			ret = GetLastError();
+			LogWarning("LookupPrivilegeValueW(%ls): %u", privs[i], ret);
+			continue;
+		}
+
+		if (!AdjustTokenPrivileges(hToken, FALSE, &p, sizeof(p), NULL, NULL)) {
+			ret = GetLastError();
+			LogWarning("AdjustTokenPrivileges(%ls): %u", privs[i], ret);
+			continue;
+		}
+	}
+
+CloseToken:
+	CloseHandle(hToken);
+Exit:
+	return ret;
+}
+
+#endif
 
 PCHANNEL_DATA _ThreadContextAlloc(const char* SourceAddress, const char* DestAddress, SOCKET SourceSocket, SOCKET DestSocket)
 {
@@ -141,7 +187,7 @@ static BOOL _CreateAsynchronousPipe(PPIPE_ENDS Pipe)
 	static volatile LONG PipeSerialNumber;
 
 	swprintf(PipeNameBuffer, sizeof(PipeNameBuffer)/sizeof(PipeNameBuffer[0]), L"\\\\.\\Pipe\\RemoteExeAnon.%x.%x", GetCurrentProcessId(), InterlockedIncrement(&PipeSerialNumber));
-	ReadPipeHandle = CreateNamedPipeW(PipeNameBuffer, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 4096, 4096, 120 * 1000, NULL);
+	ReadPipeHandle = CreateNamedPipeW(PipeNameBuffer, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 16384, 16384, 120 * 1000, NULL);
 	if (ReadPipeHandle == INVALID_HANDLE_VALUE) {
 		return FALSE;
 	}
@@ -266,17 +312,22 @@ static DWORD WINAPI _StdErrThreadRoutine(PVOID Context)
 	OVERLAPPED o;
 	DWORD ret = 0;
 	char buffer[2049];
+	BOOLEAN isPending = FALSE;
 	DWORD bytesTransferred = 0;
 	PSTDERR_THREAD_CONTEXT ctx = (PSTDERR_THREAD_CONTEXT)Context;
 
-	memset(&o, 0, sizeof(o));
-	o.hEvent = ctx->hEvent;
 	while (ret == 0) {
+		bytesTransferred = 0;
+		isPending = FALSE;
+		memset(&o, 0, sizeof(o));
+		o.hEvent = ctx->hEvent;
 		memset(buffer, 0, sizeof(buffer));
-		if (!ReadFile(ctx->hPipe, buffer, sizeof(buffer) - 1, NULL, &o)) {
+		if (!ReadFile(ctx->hPipe, buffer, sizeof(buffer) - 1, &bytesTransferred, &o)) {
 			ret = GetLastError();
-			if (ret == ERROR_IO_PENDING)
+			if (ret == ERROR_IO_PENDING) {
+				isPending = TRUE;
 				ret = 0;
+			}
 		
 			if (ret == ERROR_BROKEN_PIPE) {
 				ret = 0;
@@ -292,7 +343,7 @@ static DWORD WINAPI _StdErrThreadRoutine(PVOID Context)
 		ret = WaitForSingleObject(o.hEvent, INFINITE);
 		switch (ret) {
 			case WAIT_OBJECT_0: {
-				if (!GetOverlappedResult(ctx->hPipe, &o, &bytesTransferred, TRUE)) {
+				if (isPending && !GetOverlappedResult(ctx->hPipe, &o, &bytesTransferred, TRUE)) {
 					ret = GetLastError();
 					if (ret != ERROR_BROKEN_PIPE)
 						LogError("STDERR: GetOverlappedResult: %u", ret);
@@ -388,7 +439,7 @@ static int _SocketError()
 }
 
 
-static int _StreamData(PCHANNEL_DATA Data)
+static int _StreamData(PCHANNEL_DATA Data, BOOLEAN ReadPending, DWORD BytesRead)
 {
 	int ret = 0;
 	ssize_t len = 0;
@@ -396,10 +447,8 @@ static int _StreamData(PCHANNEL_DATA Data)
 
 	if (Data->SourcePipe) {
 #ifdef _WIN32
-		DWORD bytesRead = 0;
-
-		if (GetOverlappedResult((HANDLE)Data->SourceSocket, &Data->SourceOverlapped, &bytesRead, TRUE)) {
-			len = bytesRead;
+		if (!ReadPending || GetOverlappedResult((HANDLE)Data->SourceSocket, &Data->SourceOverlapped, &BytesRead, TRUE)) {
+			len = BytesRead;
 			memcpy(dataBuffer, Data->SourceBuffer, len);
 		} else {
 			len = 0;
@@ -457,6 +506,8 @@ static int _StreamData(PCHANNEL_DATA Data)
 static void _ProcessChannel(PCHANNEL_DATA Data)
 {
 	int ret = 0;
+	BOOLEAN isPending = FALSE;
+	DWORD bytesRead = 0;
 	struct timeval tv;
 #ifdef _WIN32
 	WSAEVENT readEvent = WSA_INVALID_EVENT;
@@ -472,7 +523,6 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	readEvent = WSACreateEvent();
 	if (readEvent != WSA_INVALID_EVENT) {
 		if (Data->SourcePipe) {
-			Data->SourceOverlapped.hEvent = readEvent;
 			Data->SourceBuffer = malloc(4096);
 			if (Data->SourceBuffer != NULL) {
 				memset(Data->SourceBuffer, 0, 4096);
@@ -490,11 +540,17 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 		do {
 #ifdef _WIN32
 			ret = 0;
+			bytesRead = 0;
+			isPending = FALSE;
 			if (Data->SourcePipe) {				
-				if (!ReadFile((HANDLE)Data->SourceSocket, Data->SourceBuffer, 4096, NULL, &Data->SourceOverlapped)) {
+				memset(&Data->SourceOverlapped, 0, sizeof(Data->SourceOverlapped));
+				Data->SourceOverlapped.hEvent = readEvent;
+				if (!ReadFile((HANDLE)Data->SourceSocket, Data->SourceBuffer, 4096, &bytesRead, &Data->SourceOverlapped)) {
 					ret = GetLastError();
-					if (ret == ERROR_IO_PENDING)
+					if (ret == ERROR_IO_PENDING) {
+						isPending = TRUE;
 						ret = 0;
+					}
 				
 					if (ret != 0) {
 						LogError("ReadFile: %i", ret);
@@ -533,7 +589,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 			ret = select((int)Data->SourceSocket + 1, &fs, NULL, NULL, &tv);
 #endif
 			if (ret > 0) {
-				ret = _StreamData(Data);
+				ret = _StreamData(Data, isPending, bytesRead);
 				switch (ret) {
 					case 0:
 						LogInfo("Connection closed");
@@ -1011,11 +1067,13 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							si.hStdOutput = End->StdOut.WriteEnd;
 							si.hStdError = End->StdErr.WriteEnd;
 							memset(&pi, 0, sizeof(pi));
-							if (!CreateProcessA(NULL, End->AcceptAddress, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+							if (!CreateProcessA(NULL, End->AcceptAddress, NULL, NULL, TRUE, CREATE_SUSPENDED, NULL, NULL, &si, &pi))
 								ret = GetLastError();
 
 							if (ret == 0) {
 								_CloseDistantEnds(&End->StdIn, &End->StdOut, &End->StdErr);
+								_AdjustPrivileges(pi.hProcess);
+								ResumeThread(pi.hThread);
 								CloseHandle(pi.hThread);
 								ret = StdErrThreadCreate(pi.hProcess, End->StdErr.ReadEnd);
 								if (ret == 0)
