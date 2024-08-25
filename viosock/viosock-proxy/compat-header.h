@@ -14,6 +14,7 @@
 #include <ws2tcpip.h>
 #include <windows.h>
 #include <winsvc.h>
+#include <winsvc.h>
 #include "vio_sockets.h"
 #else
 #include <stdarg.h>

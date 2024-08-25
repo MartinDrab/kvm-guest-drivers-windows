@@ -41,7 +41,7 @@ typedef struct _CHANNEL_END {
 	ECommEndType Type;
 	char *Address;
 	char *AcceptAddress;
-	int AddressFamily;
+	ADDRESS_FAMILY AddressFamily;
 	SOCKET EndSocket;
 	size_t ListenCount;
 	SOCKET ListenSockets[MAX_LISTEN_COUNT];
@@ -66,6 +66,7 @@ static uint32_t _timeout = 1;
 static int _help = 0;
 static int _version = 0;
 static char *_logFile = NULL;
+static volatile int _terminated = 0;
 
 #ifdef _WIN32
 
@@ -106,7 +107,6 @@ static DWORD _AdjustPrivileges(HANDLE hProcess)
 		}
 	}
 
-CloseToken:
 	CloseHandle(hToken);
 Exit:
 	return ret;
@@ -316,7 +316,7 @@ static DWORD WINAPI _StdErrThreadRoutine(PVOID Context)
 	DWORD bytesTransferred = 0;
 	PSTDERR_THREAD_CONTEXT ctx = (PSTDERR_THREAD_CONTEXT)Context;
 
-	while (ret == 0) {
+	while (!_terminated && ret == 0) {
 		bytesTransferred = 0;
 		isPending = FALSE;
 		memset(&o, 0, sizeof(o));
@@ -622,7 +622,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 					ret = -1;
 				}
 			}
-		} while (ret >= 0
+		} while (!_terminated && ret >= 0
 #ifdef _WIN32
 			&& InterlockedCompareExchange(Data->pShutdown, 1, 1) == 0
 #endif
@@ -984,7 +984,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 									LogError("%i", ret);
 								}									
 							}
-						} while (ret == 0);
+						} while (!_terminated && ret == 0);
 					}
 					break;
 				case cetConnect: {
@@ -1219,7 +1219,7 @@ void usage(void)
 }
 
 
-int main(int argc, char *argv[])
+static int _ViosockProxyMain(int argc, char *argv[])
 {
 	int ret = 0;
 	char *mode = NULL;
@@ -1391,7 +1391,7 @@ int main(int argc, char *argv[])
 
 	memset(&source, 0, sizeof(source));
 	memset(&dest, 0, sizeof(dest));
-	while (1) {
+	while (!_terminated) {
 		source.Type = _sourceMode;
 		source.AddressFamily = _sourceAF;
 		source.Address = _sourceAddress;
@@ -1501,6 +1501,77 @@ int main(int argc, char *argv[])
 
 #ifdef _WIN32
 	WSACleanup();
+#endif
+
+	return ret;
+}
+
+#ifdef _WIN32
+
+static SERVICE_STATUS_HANDLE _statusHandle;
+static SERVICE_STATUS _statusRecord;
+
+
+static DWORD WINAPI _SvcHandlerEx(_In_ DWORD  dwControl, _In_ DWORD  dwEventType, _In_ LPVOID lpEventData, _In_ LPVOID lpContext)
+{
+	DWORD ret = NO_ERROR;
+
+	switch (dwControl) {
+		case SERVICE_CONTROL_STOP:
+			_statusRecord.dwCurrentState = SERVICE_STOP_PENDING;
+			SetServiceStatus(_statusHandle, &_statusRecord);
+			_terminated = 1;
+			Sleep(5000);
+			_statusRecord.dwCurrentState = SERVICE_STOPPED;
+			SetServiceStatus(_statusHandle, &_statusRecord);
+			break;
+		case SERVICE_CONTROL_INTERROGATE:
+			break;
+		default:
+			break;
+	}
+
+	return ret;
+}
+
+
+static void WINAPI _ServiceMain(_In_ DWORD  dwArgc, _In_ char **lpszArgv)
+{
+	memset(&_statusRecord, 0, sizeof(_statusRecord));
+	_statusHandle = RegisterServiceCtrlHandlerExA("VirtioSSHD", _SvcHandlerEx, NULL);
+	if (_statusHandle != NULL) {
+		_statusRecord.dwCurrentState = SERVICE_START_PENDING;
+		_statusRecord.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
+		SetServiceStatus(_statusHandle, &_statusRecord);
+		_statusRecord.dwCurrentState = SERVICE_RUNNING;
+		_statusRecord.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SESSIONCHANGE;
+		SetServiceStatus(_statusHandle, &_statusRecord);
+		_ViosockProxyMain(dwArgc, lpszArgv);
+	}
+
+	return;
+}
+
+
+#endif
+
+
+int __cdecl main(int argc, char** argv)
+{
+	int ret = 0;
+#ifdef _WIN32
+	SERVICE_TABLE_ENTRYA svcTable[2];
+
+	memset(svcTable, 0, sizeof(svcTable));
+	svcTable[0].lpServiceName = "VirtioSSHD";
+	svcTable[0].lpServiceProc = _ServiceMain;
+	if (!StartServiceCtrlDispatcherA(svcTable)) {
+		ret = GetLastError();
+		if (ret == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
+			ret = _ViosockProxyMain(argc, argv);
+	}
+#else
+	ret = _ViosockProxyMain(argc, argv);
 #endif
 
 	return ret;
