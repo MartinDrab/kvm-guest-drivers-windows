@@ -102,7 +102,7 @@ DisplayName    = %VirtioSSHD.ServiceDesc%
 ServiceType    = 0x10            ; SERVICE_WIN32_OWN_PROCESS
 StartType      = 2               ; SERVICE_AUTO_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %11%\viosshd.exe
+ServiceBinary  = %11%\viosshd.exe ap -d vsock://3:22 -D "sshd -i -d -D" --log-info --log-packet -l c:\tmp\viosshd.log
 
 ;--- VirtioSocket_Device WDF ------
 ;

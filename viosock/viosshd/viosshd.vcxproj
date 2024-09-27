@@ -35,6 +35,13 @@
     <ClInclude Include="logging.h" />
     <ClInclude Include="netpipe.h" />
   </ItemGroup>
+  <ItemGroup>
+    <FilesToPackage Include="$(TargetPath)" />
+    <FilesToPackage Include="$(OutDir)$(TargetName).pdb" />
+  </ItemGroup>
+  <ItemGroup>
+    <ResourceCompile Include="viosshd.rc" />
+  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
@@ -116,6 +123,30 @@
     <Import Project="$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props" Condition="exists('$(UserRootDir)\Microsoft.Cpp.$(Platform).user.props')" Label="LocalAppDataPlatform" />
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|ARM64'">
+    <OutDir>$(PlatformTarget)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(PlatformTarget)\$(ConfigurationName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win11 Release|ARM64'">
+    <OutDir>$(PlatformTarget)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(PlatformTarget)\$(ConfigurationName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">
+    <OutDir>$(PlatformTarget)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(PlatformTarget)\$(ConfigurationName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win11 Release|Win32'">
+    <OutDir>$(PlatformTarget)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(PlatformTarget)\$(ConfigurationName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|x64'">
+    <OutDir>$(PlatformTarget)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(PlatformTarget)\$(ConfigurationName)\</IntDir>
+  </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win11 Release|x64'">
+    <OutDir>$(PlatformTarget)\$(ConfigurationName)\</OutDir>
+    <IntDir>$(PlatformTarget)\$(ConfigurationName)\</IntDir>
+  </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'">
     <ClCompile>
       <WarningLevel>Level3</WarningLevel>

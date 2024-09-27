@@ -30,14 +30,14 @@
     <ProjectReference Include="..\sys\viosock.vcxproj">
       <Project>{c65da065-5828-45cf-89db-fc4f21bc9e05}</Project>
     </ProjectReference>
-    <ProjectReference Include="..\viosock-proxy\viosock-proxy.vcxproj">
-      <Project>{2a22423b-0199-4d6e-9cf2-8574c9060bf3}</Project>
-    </ProjectReference>
     <ProjectReference Include="..\viosock-test\viosock-test.vcxproj">
       <Project>{5e68cce9-f95d-4a6c-a5ad-dba7ce0ca63a}</Project>
     </ProjectReference>
     <ProjectReference Include="..\viosocklib-test\viosocklib-test.vcxproj">
       <Project>{2cfbbf52-9646-4e42-9e43-9cee50735254}</Project>
+    </ProjectReference>
+    <ProjectReference Include="..\viosshd\viosshd.vcxproj">
+      <Project>{2a22423b-0199-4d6e-9cf2-8574c9060bf3}</Project>
     </ProjectReference>
     <ProjectReference Include="..\wspsvc\viosockwspsvc.vcxproj">
       <Project>{b8c784b3-7914-4539-b728-f2eae5c9795e}</Project>
