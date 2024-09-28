@@ -1,6 +1,6 @@
 
-#ifndef __NETPIPE_H__
-#define __NETPIPE_H__
+#ifndef __VIOSSHD_H__
+#define __VIOSSHD_H__
 
 
 #include "compat-header.h"
@@ -30,8 +30,11 @@ typedef struct _COMMAND_LINE_OPTION {
 } COMMAND_LINE_OPTION, *PCOMMAND_LINE_OPTION;
 
 #ifdef _WIN32
+extern volatile int _terminated;
 extern COMMAND_LINE_OPTION _cmdOptions[21];
 #endif
+
+int ViosockProxyMain(int argc, char* argv[]);
 
 
 

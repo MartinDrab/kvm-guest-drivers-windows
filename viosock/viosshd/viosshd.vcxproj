@@ -28,12 +28,21 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="logging.c" />
-    <ClCompile Include="netpipe.c" />
+    <ClCompile Include="service.c" />
+    <ClCompile Include="stderr-thread.c" />
+    <ClCompile Include="thread-context.c" />
+    <ClCompile Include="utils.c" />
+    <ClCompile Include="viosshd.c" />
+    <ClCompile Include="win-utils.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="compat-header.h" />
     <ClInclude Include="logging.h" />
-    <ClInclude Include="netpipe.h" />
+    <ClInclude Include="stderr-thread.h" />
+    <ClInclude Include="thread-context.h" />
+    <ClInclude Include="utils.h" />
+    <ClInclude Include="viosshd.h" />
+    <ClInclude Include="win-utils.h" />
   </ItemGroup>
   <ItemGroup>
     <FilesToPackage Include="$(TargetPath)" />

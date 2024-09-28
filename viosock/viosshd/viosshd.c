@@ -1,33 +1,14 @@
 
 #include "compat-header.h"
 #include "logging.h"
-#include "netpipe.h"
-
+#include "utils.h"
+#include "thread-context.h"
 #ifdef _WIN32
-
-typedef struct _PIPE_ENDS {
-	HANDLE ReadEnd;
-	HANDLE WriteEnd;
-} PIPE_ENDS, *PPIPE_ENDS;
-
+#include "win-utils.h"
+#include "stderr-thread.h"
 #endif
+#include "viosshd.h"
 
-typedef struct _CHANNEL_DATA {
-	SOCKET SourceSocket;
-	SOCKET DestSocket;
-	char *SourceAddress;
-	char *DestAddress;
-	struct timeval Timeout;
-#ifdef _WIN32
-	OVERLAPPED SourceOverlapped;
-	void *SourceBuffer;
-	volatile LONG Shutdown;
-	volatile LONG *pShutdown;
-#endif
-	int DontCloseDestSocket : 1;
-	int SourcePipe : 1;
-	int DestPipe : 1;
-} CHANNEL_DATA, *PCHANNEL_DATA;
 
 typedef enum _ECommEndType {
 	cetConnect,
@@ -66,377 +47,7 @@ static uint32_t _timeout = 1;
 static int _help = 0;
 static int _version = 0;
 static char *_logFile = NULL;
-static volatile int _terminated = 0;
-
-#ifdef _WIN32
-
-static DWORD _AdjustPrivileges(HANDLE hProcess)
-{
-	DWORD ret = 0;
-	HANDLE hToken = 0;
-	const wchar_t *privs[] = {
-		SE_BACKUP_NAME,
-		SE_RESTORE_NAME,
-		SE_TCB_NAME,
-		SE_ASSIGNPRIMARYTOKEN_NAME,
-		SE_IMPERSONATE_NAME,
-	};
-
-	if (!OpenProcessToken(hProcess, TOKEN_QUERY | TOKEN_ADJUST_PRIVILEGES, &hToken)) {
-		ret = GetLastError();
-		LogError("OpenProcessToken: %u", ret);
-		goto Exit;
-	}
-
-	for (size_t i = 0; i < sizeof(privs) / sizeof(privs[0]); ++i) {
-		TOKEN_PRIVILEGES p;
-
-		memset(&p, 0, sizeof(p));
-		p.PrivilegeCount = 1;
-		p.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-		if (!LookupPrivilegeValueW(NULL, privs[i], &p.Privileges[0].Luid)) {
-			ret = GetLastError();
-			LogWarning("LookupPrivilegeValueW(%ls): %u", privs[i], ret);
-			continue;
-		}
-
-		if (!AdjustTokenPrivileges(hToken, FALSE, &p, sizeof(p), NULL, NULL)) {
-			ret = GetLastError();
-			LogWarning("AdjustTokenPrivileges(%ls): %u", privs[i], ret);
-			continue;
-		}
-	}
-
-	CloseHandle(hToken);
-Exit:
-	return ret;
-}
-
-#endif
-
-PCHANNEL_DATA _ThreadContextAlloc(const char* SourceAddress, const char* DestAddress, SOCKET SourceSocket, SOCKET DestSocket)
-{
-	PCHANNEL_DATA ret = NULL;
-
-	ret = malloc(sizeof(CHANNEL_DATA));
-	if (ret == NULL) {
-		errno = ENOMEM;
-		goto Exit;
-	}
-
-	memset(ret, 0, sizeof(CHANNEL_DATA));
-	ret->Timeout.tv_sec = 5;
-	ret->Timeout.tv_usec = 0;
-	ret->SourceSocket = SourceSocket;
-	ret->DestSocket = DestSocket;
-	ret->SourceAddress = strdup(SourceAddress);
-	if (ret->SourceAddress == NULL) {
-		errno = ENOMEM;
-		goto FreeContext;
-	}
-
-	ret->DestAddress = strdup(DestAddress);
-	if (ret->DestAddress == NULL) {
-		errno = ENOMEM;
-		goto FreeSourceAddress;
-	}
-
-	goto Exit;
-FreeSourceAddress:
-	free(ret->SourceAddress);
-FreeContext:
-	free(ret);
-	ret = NULL;
-Exit:
-	return ret;
-}
-
-
-static void _ThreadContextFree(PCHANNEL_DATA Ctx)
-{
-	if (!Ctx->SourcePipe)
-		closesocket(Ctx->SourceSocket);
-#ifdef _WIN32
-	else CloseHandle((HANDLE)Ctx->SourceSocket);
-#endif
-
-	if (!Ctx->DontCloseDestSocket) {
-		if (!Ctx->DestPipe)
-			closesocket(Ctx->DestSocket);
-#ifdef _WIN32
-		else CloseHandle((HANDLE)Ctx->DestSocket);
-#endif
-	}
-
-	free(Ctx->SourceAddress);
-	free(Ctx->DestAddress);
-	free(Ctx);
-
-	return;
-}
-
-
-#ifdef _WIN32
-
-static BOOL _CreateAsynchronousPipe(PPIPE_ENDS Pipe)
-{
-	DWORD dwError;
-	HANDLE ReadPipeHandle = NULL;
-	HANDLE WritePipeHandle = NULL;
-	wchar_t PipeNameBuffer[MAX_PATH];
-	static volatile LONG PipeSerialNumber;
-
-	swprintf(PipeNameBuffer, sizeof(PipeNameBuffer)/sizeof(PipeNameBuffer[0]), L"\\\\.\\Pipe\\RemoteExeAnon.%x.%x", GetCurrentProcessId(), InterlockedIncrement(&PipeSerialNumber));
-	ReadPipeHandle = CreateNamedPipeW(PipeNameBuffer, PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE, PIPE_TYPE_BYTE | PIPE_WAIT, 1, 16384, 16384, 120 * 1000, NULL);
-	if (ReadPipeHandle == INVALID_HANDLE_VALUE) {
-		return FALSE;
-	}
-
-	WritePipeHandle = CreateFileW(PipeNameBuffer, GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OVERLAPPED, NULL);
-	if (WritePipeHandle == INVALID_HANDLE_VALUE) {
-		dwError = GetLastError();
-		CloseHandle(ReadPipeHandle);
-		SetLastError(dwError);
-		return FALSE;
-	}
-
-	Pipe->ReadEnd = ReadPipeHandle;
-	Pipe->WriteEnd = WritePipeHandle;
-
-	return TRUE;
-}
-
-
-static void _CloseAsynchronousPipe(PPIPE_ENDS Pipe)
-{
-	if (Pipe->ReadEnd != NULL) {
-		CloseHandle(Pipe->ReadEnd);
-		Pipe->ReadEnd = NULL;
-	}
-
-	if (Pipe->WriteEnd!= NULL) {
-		CloseHandle(Pipe->WriteEnd);
-		Pipe->WriteEnd = NULL;
-	}
-
-	return;
-}
-
-
-static BOOL _CreateStdPipes(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut, PPIPE_ENDS StdErr)
-{
-	BOOL ret = FALSE;
-	DWORD err = ERROR_GEN_FAILURE;
-
-	ret = _CreateAsynchronousPipe(StdIn);
-	if (!ret) {
-		err = GetLastError();
-		goto Exit;
-	}
-
-	ret = _CreateAsynchronousPipe(StdOut);
-	if (!ret) {
-		err = GetLastError();
-		goto CloseIn;
-	}
-
-	ret = _CreateAsynchronousPipe(StdErr);
-	if (!ret) {
-		err = GetLastError();
-		goto CloseOut;
-	}
-
-	ret = SetHandleInformation(StdIn->ReadEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-	if (!ret) {
-		err = GetLastError();
-		goto CloseErr;
-	}
-
-	ret = SetHandleInformation(StdOut->WriteEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-	if (!ret) {
-		err = GetLastError();
-		goto CloseErr;
-	}
-
-	ret = SetHandleInformation(StdErr->WriteEnd, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
-	if (!ret) {
-		err = GetLastError();
-		goto CloseErr;
-	}
-
-	goto Exit;
-CloseErr:
-	_CloseAsynchronousPipe(StdErr);
-CloseOut:
-	_CloseAsynchronousPipe(StdOut);
-CloseIn:
-	_CloseAsynchronousPipe(StdIn);
-Exit:
-	if (!ret)
-		SetLastError(err);
-
-	return ret;
-}
-
-
-static void _CloseDistantEnds(PPIPE_ENDS StdIn, PPIPE_ENDS StdOut, PPIPE_ENDS StdErr)
-{
-	if (StdIn->ReadEnd != NULL) {
-		CloseHandle(StdIn->ReadEnd);
-		StdIn->ReadEnd = NULL;
-	}
-
-	if (StdOut->WriteEnd != NULL) {
-		CloseHandle(StdOut->WriteEnd);
-		StdOut->WriteEnd = NULL;
-	}
-
-	if (StdErr->WriteEnd != NULL) {
-		CloseHandle(StdErr->WriteEnd);
-		StdErr->WriteEnd = NULL;
-	}
-
-	return;
-}
-
-
-typedef struct _STDERR_THREAD_CONTEXT {
-	HANDLE hProcess;
-	HANDLE hEvent;
-	HANDLE hPipe;
-} STDERR_THREAD_CONTEXT, *PSTDERR_THREAD_CONTEXT;
-
-
-static DWORD WINAPI _StdErrThreadRoutine(PVOID Context)
-{
-	OVERLAPPED o;
-	DWORD ret = 0;
-	char buffer[2049];
-	BOOLEAN isPending = FALSE;
-	DWORD bytesTransferred = 0;
-	PSTDERR_THREAD_CONTEXT ctx = (PSTDERR_THREAD_CONTEXT)Context;
-
-	while (!_terminated && ret == 0) {
-		bytesTransferred = 0;
-		isPending = FALSE;
-		memset(&o, 0, sizeof(o));
-		o.hEvent = ctx->hEvent;
-		memset(buffer, 0, sizeof(buffer));
-		if (!ReadFile(ctx->hPipe, buffer, sizeof(buffer) - 1, &bytesTransferred, &o)) {
-			ret = GetLastError();
-			if (ret == ERROR_IO_PENDING) {
-				isPending = TRUE;
-				ret = 0;
-			}
-		
-			if (ret == ERROR_BROKEN_PIPE) {
-				ret = 0;
-				break;
-			}
-		}
-
-		if (ret != 0) {
-			LogError("STDERR: ReadFile: %u", ret);
-			break;
-		}
-
-		ret = WaitForSingleObject(o.hEvent, INFINITE);
-		switch (ret) {
-			case WAIT_OBJECT_0: {
-				if (isPending && !GetOverlappedResult(ctx->hPipe, &o, &bytesTransferred, TRUE)) {
-					ret = GetLastError();
-					if (ret != ERROR_BROKEN_PIPE)
-						LogError("STDERR: GetOverlappedResult: %u", ret);
-					
-					break;
-				}
-
-				LogInfo("STDERR (%u): %s", bytesTransferred, buffer);
-			} break;
-			default:
-				ret = GetLastError();
-				LogError("STDERR: WaitForSingleObject: %u", ret);
-				break;
-		}
-	}
-
-	if (ret == ERROR_BROKEN_PIPE)
-		ret = 0;
-
-	if (ret != 0) {
-		LogError("STDERR: Terminating the process with error %u", ret);
-		TerminateProcess(ctx->hProcess, ret);
-	}
-
-	CloseHandle(ctx->hProcess);
-	CloseHandle(ctx->hEvent);
-	CloseHandle(ctx->hPipe);
-	free(ctx);
-
-	return ret;
-}
-
-
-static DWORD StdErrThreadCreate(HANDLE hProcess, HANDLE hPipe)
-{
-	DWORD ret = 0;
-	DWORD tid = 0;
-	HANDLE hThread = NULL;
-	PSTDERR_THREAD_CONTEXT ctx = NULL;
-
-	ctx = malloc(sizeof(STDERR_THREAD_CONTEXT));
-	if (ctx == NULL) {
-		ret = ERROR_NOT_ENOUGH_MEMORY;
-		goto Exit;
-	}
-
-	memset(ctx, 0, sizeof(STDERR_THREAD_CONTEXT));
-	ctx->hPipe = hPipe;
-	ctx->hProcess = hProcess;
-	ctx->hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
-	if (ctx->hEvent == NULL) {
-		ret = GetLastError();
-		goto FreeCtx;
-	}
-
-	hThread = CreateThread(NULL, 0, _StdErrThreadRoutine, ctx, 0, &tid);
-	if (hThread == NULL) {
-		ret = GetLastError();
-		goto CloseEvent;
-	}
-
-	CloseHandle(hThread);
-	ctx = NULL;
-CloseEvent:
-	if (ctx != NULL)
-		CloseHandle(ctx->hEvent);
-FreeCtx:
-	if (ctx != NULL)
-		free(ctx);
-Exit:
-	return ret;
-}
-
-
-#endif
-
-
-static int _SocketError()
-{
-	int ret = 0;
-#ifdef _WIN32
-	ret = WSAGetLastError();
-	errno = ret;
-	switch (ret) {
-		case WSAEWOULDBLOCK:
-			errno = EWOULDBLOCK;
-			break;
-	}
-#endif
-	ret = errno;
-
-	return ret;
-}
+volatile int _terminated = 0;
 
 
 static int _StreamData(PCHANNEL_DATA Data, BOOLEAN ReadPending, DWORD BytesRead)
@@ -452,7 +63,7 @@ static int _StreamData(PCHANNEL_DATA Data, BOOLEAN ReadPending, DWORD BytesRead)
 			memcpy(dataBuffer, Data->SourceBuffer, len);
 		} else {
 			len = 0;
-			if (_SocketError() != ERROR_BROKEN_PIPE) {
+			if (SocketError() != ERROR_BROKEN_PIPE) {
 				len = -1;
 				LogError("GetOverlappedResult: %u", GetLastError());
 			}
@@ -480,7 +91,7 @@ static int _StreamData(PCHANNEL_DATA Data, BOOLEAN ReadPending, DWORD BytesRead)
 			} else tmp = send(Data->DestSocket, dataBuffer, len, 0);
 			
 			if (tmp == -1) {
-				tmp = _SocketError();
+				tmp = SocketError();
 				if (tmp == EWOULDBLOCK) {
 					LogPacket("--- Destination socket full, sleeping...");
 					sleep(1);
@@ -530,10 +141,10 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 		} else ret = WSAEventSelect(Data->SourceSocket, readEvent, FD_OOB | FD_CLOSE | FD_READ);
 		
 		if (ret == SOCKET_ERROR) {
-			ret = _SocketError();
+			ret = SocketError();
 			WSACloseEvent(readEvent);
 		}
-	} else ret = _SocketError();
+	} else ret = SocketError();
 #endif
 	if (ret == 0) {
 		LogInfo("Starting to process the connection (%s --> %s)", Data->SourceAddress, Data->DestAddress);
@@ -570,7 +181,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 							memset(&nes, 0, sizeof(nes));
 							if (WSAEnumNetworkEvents(Data->SourceSocket, readEvent, &nes) == SOCKET_ERROR) {
 								ret = -1;
-								LogError("WSAEnumNetworkEvents: %i", _SocketError());
+								LogError("WSAEnumNetworkEvents: %i", SocketError());
 							}
 						}
 					} break;
@@ -596,7 +207,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 						ret = -1;
 						break;
 					case -1:
-						ret = _SocketError();
+						ret = SocketError();
 						if (ret == EWOULDBLOCK)
 							ret = 0;
 
@@ -610,7 +221,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 						break;
 				}
 			} else if (ret == SOCKET_ERROR) {
-				ret = _SocketError();
+				ret = SocketError();
 				if (errno == EINTR)
 					ret = 0;
 
@@ -643,7 +254,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 	if (!Data->DestPipe)
 		shutdown(Data->DestSocket, SD_BOTH);
 #endif
-	_ThreadContextFree(Data);
+	ThreadContextFree(Data);
 
 	LogInfo("Exitting");
 	return;
@@ -810,7 +421,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							LogInfo("Creating a socket #%zu", index);
 							End->ListenSockets[index] = socket(tmp->ai_family, SOCK_STREAM, tmp->ai_protocol);
 							if (End->ListenSockets[index] == INVALID_SOCKET) {
-								ret = _SocketError();
+								ret = SocketError();
 								free(End->ListenAddresses[index]);
 								LogError("Error %i", ret);
 								break;
@@ -818,7 +429,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							
 							ret = ioctlsocket(End->ListenSockets[index], FIONBIO, &nb);
 							if (ret == SOCKET_ERROR) {
-								ret = _SocketError();
+								ret = SocketError();
 								closesocket(End->ListenSockets[index]);
 								free(End->ListenAddresses[index]);
 								LogError("Error %i", ret);
@@ -828,7 +439,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							LogInfo("Binding to address %s", End->ListenAddresses[index]);
 							ret = bind(End->ListenSockets[index], tmp->ai_addr, tmp->ai_addrlen);
 							if (ret == INVALID_SOCKET) {
-								ret = _SocketError();
+								ret = SocketError();
 								closesocket(End->ListenSockets[index]);
 								free(End->ListenAddresses[index]);
 								tmp = tmp->ai_next;
@@ -839,7 +450,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							LogInfo("Creating listen event");
 							End->ListenEvents[index] = WSACreateEvent();
 							if (End->ListenEvents[index] == WSA_INVALID_EVENT) {
-								ret = _SocketError();
+								ret = SocketError();
 								closesocket(End->ListenSockets[index]);
 								free(End->ListenAddresses[index]);
 								LogWarning("Error %i", ret);
@@ -848,7 +459,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 
 							ret = WSAEventSelect(End->ListenSockets[index], End->ListenEvents[index], FD_CLOSE | FD_ACCEPT);
 							if (ret == SOCKET_ERROR) {
-								ret = _SocketError();
+								ret = SocketError();
 								WSACloseEvent(End->ListenEvents[index]);
 								closesocket(End->ListenSockets[index]);
 								free(End->ListenAddresses[index]);
@@ -859,7 +470,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 							LogInfo("Listening...");
 							ret = listen(End->ListenSockets[index], SOMAXCONN);
 							if (ret == SOCKET_ERROR) {
-								ret = _SocketError();
+								ret = SocketError();
 #ifdef _WIN32
 								WSACloseEvent(End->ListenEvents[index]);
 #endif
@@ -945,7 +556,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 								if (End->EndSocket != INVALID_SOCKET) {
 									End->AcceptAddress = sockaddrstr((struct sockaddr *)&acceptAddr);
 									if (End->AcceptAddress != NULL) {
-										int ka = 1;									ret = _SocketError();
+										int ka = 1;									ret = SocketError();
 
 										ret = 0;
 										LogInfo("Accepted a connection from %s", End->AcceptAddress);
@@ -961,7 +572,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 										closesocket(End->EndSocket);
 										End->EndSocket = INVALID_SOCKET;
 									}
-								} else ret = _SocketError();
+								} else ret = SocketError();
 
 								if (ret == 0)
 									break;
@@ -969,7 +580,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 								if (ret == EAGAIN || ret == EWOULDBLOCK)
 									ret = 0;
 							} else if (ret == SOCKET_ERROR) {
-								ret = _SocketError();
+								ret = SocketError();
 								if (ret == EINTR)
 									ret = 0;
 
@@ -1004,7 +615,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 						LogInfo("Creating a socket for %s", addrstr);
 						End->EndSocket = socket(tmp->ai_family, SOCK_STREAM, tmp->ai_protocol);
 						if (End->EndSocket == INVALID_SOCKET) {
-							ret = _SocketError();
+							ret = SocketError();
 							free(addrstr);
 							LogError("Error %i", ret);
 							tmp = tmp->ai_next;
@@ -1014,7 +625,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 						LogInfo("Connesting to %s (%s)", End->Address, addrstr);
 						ret = connect(End->EndSocket, tmp->ai_addr, tmp->ai_addrlen);
 						if (ret == SOCKET_ERROR) {
-							ret = _SocketError();
+							ret = SocketError();
 							closesocket(End->EndSocket);
 							End->EndSocket = INVALID_SOCKET;
 							free(addrstr);
@@ -1025,7 +636,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 
 						ret = setsockopt(End->EndSocket, SOL_SOCKET, SO_KEEPALIVE, (char *)&nb, sizeof(nb));;
 						if (ret == SOCKET_ERROR) {
-							ret = _SocketError();
+							ret = SocketError();
 							closesocket(End->EndSocket);
 							End->EndSocket = INVALID_SOCKET;
 							free(addrstr);
@@ -1036,7 +647,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 
 						ret = ioctlsocket(End->EndSocket, FIONBIO, &nb);
 						if (ret == SOCKET_ERROR) {
-							ret = _SocketError();
+							ret = SocketError();
 							closesocket(End->EndSocket);
 							End->EndSocket = INVALID_SOCKET;
 							free(addrstr);
@@ -1053,7 +664,7 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 #ifdef _WIN32
 				case cetProcess: {
 					LogInfo("Creating stdin/stdout pipes...");
-					if (_CreateStdPipes(&End->StdIn, &End->StdOut, &End->StdErr)) {
+					if (WinCreateStdPipes(&End->StdIn, &End->StdOut, &End->StdErr)) {
 						End->AcceptAddress = strdup(End->Address);
 						if (End->AcceptAddress != NULL) {
 							STARTUPINFOA si;
@@ -1071,8 +682,8 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 								ret = GetLastError();
 
 							if (ret == 0) {
-								_CloseDistantEnds(&End->StdIn, &End->StdOut, &End->StdErr);
-								_AdjustPrivileges(pi.hProcess);
+								WinCloseDistantEnds(&End->StdIn, &End->StdOut, &End->StdErr);
+								WinAdjustPrivileges(pi.hProcess);
 								ResumeThread(pi.hThread);
 								CloseHandle(pi.hThread);
 								ret = StdErrThreadCreate(pi.hProcess, End->StdErr.ReadEnd);
@@ -1087,11 +698,11 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 						} else ret = ENOMEM;
 
 						if (ret != 0) {
-							_CloseAsynchronousPipe(&End->StdErr);
-							_CloseAsynchronousPipe(&End->StdIn);
-							_CloseAsynchronousPipe(&End->StdOut);
+							WinCloseAsynchronousPipe(&End->StdErr);
+							WinCloseAsynchronousPipe(&End->StdIn);
+							WinCloseAsynchronousPipe(&End->StdOut);
 						}
-					} else ret = _SocketError();
+					} else ret = SocketError();
 				} break;
 #endif
 			}
@@ -1124,52 +735,6 @@ static int _PrepareChannelEnd(PCHANNEL_END End)
 	}
 
 	return ret;
-}
-
-
-#define ADDR_PREFIX_IPV4		"ip4://"
-#define ADDR_PREFIX_IPV6		"ip6://"
-#define ADDR_PREFIX_UNIX		"unix://"
-#define ADDR_PREFIX_VSOCK		"vsock://"
-
-
-static void _ProcessAddress(const char *Address, const char **RealAddress, ADDRESS_FAMILY *Family)
-{
-	const char *prefixes[] = {
-		ADDR_PREFIX_IPV4,
-		ADDR_PREFIX_IPV6,
-		ADDR_PREFIX_UNIX,
-		ADDR_PREFIX_VSOCK,
-	};
-	ADDRESS_FAMILY families[] = {
-		AF_INET,
-		AF_INET6,
-		AF_UNIX,
-		0,
-	};
-	const size_t len = strlen(Address);
-
-#ifdef _WIN32
-	families[3] = ViosockGetAF();
-#else
-	families[3] = AF_VSOCK;
-#endif
-	*Family = AF_UNSPEC;
-	*RealAddress = Address;
-	for (size_t i = 0; i < sizeof(prefixes)/sizeof(prefixes[0]); ++i) {
-		const char *p = prefixes[i];
-		const size_t pLen = strlen(p);
-		const ADDRESS_FAMILY f = families[i];
-		
-		if (pLen <= len &&
-			memcmp(Address, p, pLen) == 0) {
-			*Family = f;
-			*RealAddress = Address + pLen;
-			break;
-		}
-	}
-
-	return;
 }
 
 
@@ -1219,7 +784,7 @@ void usage(void)
 }
 
 
-static int _ViosockProxyMain(int argc, char *argv[])
+int ViosockProxyMain(int argc, char *argv[])
 {
 	int ret = 0;
 	char *mode = NULL;
@@ -1296,12 +861,12 @@ static int _ViosockProxyMain(int argc, char *argv[])
 			case otSourceHost:
 				_sourceAddress = *arg;
 				if (_sourceMode != cetProcess)
-					_ProcessAddress(*arg, &_sourceAddress, &_sourceAF);
+					ProcessAddress(*arg, &_sourceAddress, &_sourceAF);
 				break;
 			case otTargetHost:
 				_targetAddress = *arg;
 				if (_targetMode != cetProcess)
-					_ProcessAddress(*arg, &_targetAddress, &_destAF);
+					ProcessAddress(*arg, &_targetAddress, &_destAF);
 				break;
 			case otLogError:
 				_loggingFlags |= LOG_FLAG_ERROR;
@@ -1406,9 +971,9 @@ static int _ViosockProxyMain(int argc, char *argv[])
 			if (ret == 0) {
 				PCHANNEL_DATA d[2];
 
-				d[0] = _ThreadContextAlloc(source.AcceptAddress, dest.AcceptAddress, source.EndSocket, dest.EndSocket);
+				d[0] = ThreadContextAlloc(source.AcceptAddress, dest.AcceptAddress, source.EndSocket, dest.EndSocket);
 				if (d[0] != NULL) {
-					d[1] = _ThreadContextAlloc(dest.AcceptAddress, source.AcceptAddress, dest.EndSocket, source.EndSocket);
+					d[1] = ThreadContextAlloc(dest.AcceptAddress, source.AcceptAddress, dest.EndSocket, source.EndSocket);
 					if (d[1] != NULL) {
 						d[0]->DontCloseDestSocket = 1;
 						d[1]->DontCloseDestSocket = 1;
@@ -1464,11 +1029,11 @@ static int _ViosockProxyMain(int argc, char *argv[])
 						}
 #endif
 						if (d[1] != NULL)
-							_ThreadContextFree(d[1]);
+							ThreadContextFree(d[1]);
 					}
 
 					if (d[0] != NULL)
-						_ThreadContextFree(d[0]);
+						ThreadContextFree(d[0]);
 					
 					source.EndSocket = INVALID_SOCKET;
 					dest.EndSocket = INVALID_SOCKET;
@@ -1482,8 +1047,10 @@ static int _ViosockProxyMain(int argc, char *argv[])
 					dest.AcceptAddress = NULL;
 				}
 
-				_CloseAsynchronousPipe(&dest.StdIn);
-				_CloseAsynchronousPipe(&dest.StdOut);
+#ifdef _WIN32
+				WinCloseAsynchronousPipe(&dest.StdIn);
+				WinCloseAsynchronousPipe(&dest.StdOut);
+#endif
 			} else LogError("Failed to prepare the target channel: %u", ret);
 
 			if (source.EndSocket != INVALID_SOCKET)
@@ -1501,77 +1068,6 @@ static int _ViosockProxyMain(int argc, char *argv[])
 
 #ifdef _WIN32
 	WSACleanup();
-#endif
-
-	return ret;
-}
-
-#ifdef _WIN32
-
-static SERVICE_STATUS_HANDLE _statusHandle;
-static SERVICE_STATUS _statusRecord;
-
-
-static DWORD WINAPI _SvcHandlerEx(_In_ DWORD  dwControl, _In_ DWORD  dwEventType, _In_ LPVOID lpEventData, _In_ LPVOID lpContext)
-{
-	DWORD ret = NO_ERROR;
-
-	switch (dwControl) {
-		case SERVICE_CONTROL_STOP:
-			_statusRecord.dwCurrentState = SERVICE_STOP_PENDING;
-			SetServiceStatus(_statusHandle, &_statusRecord);
-			_terminated = 1;
-			Sleep(5000);
-			_statusRecord.dwCurrentState = SERVICE_STOPPED;
-			SetServiceStatus(_statusHandle, &_statusRecord);
-			break;
-		case SERVICE_CONTROL_INTERROGATE:
-			break;
-		default:
-			break;
-	}
-
-	return ret;
-}
-
-
-static void WINAPI _ServiceMain(_In_ DWORD  dwArgc, _In_ char **lpszArgv)
-{
-	memset(&_statusRecord, 0, sizeof(_statusRecord));
-	_statusHandle = RegisterServiceCtrlHandlerExA("VirtioSSHD", _SvcHandlerEx, NULL);
-	if (_statusHandle != NULL) {
-		_statusRecord.dwCurrentState = SERVICE_START_PENDING;
-		_statusRecord.dwServiceType = SERVICE_WIN32_OWN_PROCESS;
-		SetServiceStatus(_statusHandle, &_statusRecord);
-		_statusRecord.dwCurrentState = SERVICE_RUNNING;
-		_statusRecord.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SESSIONCHANGE;
-		SetServiceStatus(_statusHandle, &_statusRecord);
-		_ViosockProxyMain(dwArgc, lpszArgv);
-	}
-
-	return;
-}
-
-
-#endif
-
-
-int __cdecl main(int argc, char** argv)
-{
-	int ret = 0;
-#ifdef _WIN32
-	SERVICE_TABLE_ENTRYA svcTable[2];
-
-	memset(svcTable, 0, sizeof(svcTable));
-	svcTable[0].lpServiceName = "VirtioSSHD";
-	svcTable[0].lpServiceProc = _ServiceMain;
-	if (!StartServiceCtrlDispatcherA(svcTable)) {
-		ret = GetLastError();
-		if (ret == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
-			ret = _ViosockProxyMain(argc, argv);
-	}
-#else
-	ret = _ViosockProxyMain(argc, argv);
 #endif
 
 	return ret;
