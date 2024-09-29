@@ -7,12 +7,14 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <sys/types.h>
+#include <windows.h>
 #include "logging.h"
 
 
 
 uint32_t _loggingFlags = (LOG_FLAG_ERROR | LOG_FLAG_WARNING);
 static FILE *_logStream = NULL;
+static int _debugger = 0;
 
 
 
@@ -28,8 +30,11 @@ void LogMsg(uint32_t Level, const char *Format, ...)
 		memset(msg, 0, sizeof(msg));
 		va_start(vs, Format);
 		vsnprintf(msg, sizeof(msg), Format, vs);
-		fputs(msg, _logStream);
-		fflush(_logStream);
+		if (!_debugger) {
+			fputs(msg, _logStream);
+			fflush(_logStream);
+		} else OutputDebugStringA(msg);
+		
 		va_end(vs);
 	}
 
@@ -45,5 +50,16 @@ int LogSetFile(const char *FileName)
 	if (_logStream == NULL)
 		ret = errno;
 
+	if (ret == 0)
+		_debugger = 0;
+
 	return ret;
+}
+
+
+void LogSetDebugger(int Enable)
+{
+	_debugger = Enable;
+
+	return;
 }

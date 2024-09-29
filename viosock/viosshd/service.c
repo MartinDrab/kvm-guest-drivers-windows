@@ -1,5 +1,6 @@
 
 #include "compat-header.h"
+#include "logging.h"
 #include "viosshd.h"
 
 
@@ -44,10 +45,12 @@ static void WINAPI _ServiceMain(_In_ DWORD  dwArgc, _In_ char** lpszArgv)
 		_statusRecord.dwCurrentState = SERVICE_RUNNING;
 		_statusRecord.dwControlsAccepted = SERVICE_ACCEPT_STOP | SERVICE_ACCEPT_SESSIONCHANGE;
 		SetServiceStatus(_statusHandle, &_statusRecord);
-		if (ViosockProxyMain(dwArgc, lpszArgv) != 0) {
+		if (ViosockProxyMain() != 0) {
 			_statusRecord.dwCurrentState = SERVICE_STOPPED;
 			SetServiceStatus(_statusHandle, &_statusRecord);
 		}
+	} else {
+		LogError("RegisterServiceCtrlHandlerExA: %u", GetLastError());
 	}
 
 	return;
@@ -60,20 +63,26 @@ static void WINAPI _ServiceMain(_In_ DWORD  dwArgc, _In_ char** lpszArgv)
 int __cdecl main(int argc, char** argv)
 {
 	int ret = 0;
-#ifdef _WIN32
-	SERVICE_TABLE_ENTRYA svcTable[2];
 
-	memset(svcTable, 0, sizeof(svcTable));
-	svcTable[0].lpServiceName = "VirtioSSHD";
-	svcTable[0].lpServiceProc = _ServiceMain;
-	if (!StartServiceCtrlDispatcherA(svcTable)) {
-		ret = GetLastError();
-		if (ret == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
-			ret = ViosockProxyMain(argc, argv);
-	}
+	LogSetDebugger(1);
+	ret = ViosockProxyPraseCommandLine(argc, argv);
+	if (ret == 0) {
+#ifdef _WIN32
+		SERVICE_TABLE_ENTRYA svcTable[2];
+
+		memset(svcTable, 0, sizeof(svcTable));
+		svcTable[0].lpServiceName = "VirtioSSHD";
+		svcTable[0].lpServiceProc = _ServiceMain;
+		if (!StartServiceCtrlDispatcherA(svcTable)) {
+			ret = GetLastError();
+			LogWarning("StartServiceCtrlDispatcherA: %u", ret);
+			if (ret == ERROR_FAILED_SERVICE_CONTROLLER_CONNECT)
+				ret = ViosockProxyMain();
+		}
 #else
-	ret = ViosockProxyMain(argc, argv);
+		ret = ViosockProxyMain();
 #endif
+	}
 
 	return ret;
 }

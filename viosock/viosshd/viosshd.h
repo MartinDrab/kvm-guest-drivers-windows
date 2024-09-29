@@ -34,7 +34,8 @@ extern volatile int _terminated;
 extern COMMAND_LINE_OPTION _cmdOptions[21];
 #endif
 
-int ViosockProxyMain(int argc, char* argv[]);
+int ViosockProxyPraseCommandLine(int argc, char **argv);
+int ViosockProxyMain(void);
 
 
 

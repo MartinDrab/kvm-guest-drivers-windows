@@ -758,36 +758,34 @@ COMMAND_LINE_OPTION _cmdOptions[] = {
 
 void usage(void)
 {
-	fprintf(stderr, "Usage: netpipe <mode> [options]\n");
-	fprintf(stderr, "Supported modes:\n");
-	fprintf(stderr, "  aa - accept connection from both source and destination\n");
-	fprintf(stderr, "  ac - accept connection from the source, make connection to the target\n");
-	fprintf(stderr, "  ca - make connection to the source, accept connection from the target\n");
-	fprintf(stderr, "  cc - connect to both source and target\n");
-	fprintf(stderr, "The connection to the target is established only after the source connection\n");
-	fprintf(stderr, "Options:\n");
+	LogInfo("Usage: netpipe <mode> [options]");
+	LogInfo("Supported modes:");
+	LogInfo("  aa - accept connection from both source and destination");
+	LogInfo("  ac - accept connection from the source, make connection to the target");
+	LogInfo("  ca - make connection to the source, accept connection from the target");
+	LogInfo("  cc - connect to both source and target");
+	LogInfo("The connection to the target is established only after the source connection");
+	LogInfo("Options:\n");
 	for (const COMMAND_LINE_OPTION *c = _cmdOptions; c->Type != otUnknown; c++) {
-		fprintf(stderr, "  %s", c->Names[0]);
+		LogInfo("  %s", c->Names[0]);
 		for (int i = 1 ; i < c->NameCount; i++)
-			fprintf(stderr, ", %s", c->Names[i]);
+			LogInfo(", %s", c->Names[i]);
 
 		if (c->ArgumentType != NULL)
-			fprintf(stderr, " <%s>", c->ArgumentType);
+			LogInfo(" <%s>", c->ArgumentType);
 
 		if (c->Description)
-			fprintf(stderr, " - %s", c->Description);
-
-		fputc('\n', stderr);
+			LogInfo(" - %s", c->Description);
 	}
 
 	return;
 }
 
 
-int ViosockProxyMain(int argc, char *argv[])
+int ViosockProxyPraseCommandLine(int argc, char **argv)
 {
 	int ret = 0;
-	char *mode = NULL;
+	const char *mode = NULL;
 
 	if (argc < 2) {
 		usage();
@@ -809,7 +807,7 @@ int ViosockProxyMain(int argc, char *argv[])
 		_targetMode = cetAccept;
 	}
 #ifdef _WIN32
-	else if(strcmp(mode, "ap") == 0) {
+	else if (strcmp(mode, "ap") == 0) {
 		_sourceMode = cetAccept;
 		_targetMode = cetProcess;
 	} else if (strcmp(mode, "cp") == 0) {
@@ -818,11 +816,11 @@ int ViosockProxyMain(int argc, char *argv[])
 	}
 #endif
 	else {
-		fprintf(stderr, "Unknown operating mode \"%s\"\n", mode);
+		LogError("Unknown operating mode \"%s\"", mode);
 		return -2;
 	}
 
-	char **arg = argv + 2;
+	char** arg = argv + 2;
 	argc -= 2;
 	while (ret == 0 && argc > 0) {
 		int found = 0;
@@ -841,7 +839,7 @@ int ViosockProxyMain(int argc, char *argv[])
 
 					if (cmdOption->Specified > 1)
 						LogWarning("The %s has been specified for %uth time, the last specification is used", *arg);;
-				
+
 					arg_advance(argc, arg);
 					break;
 				}
@@ -902,16 +900,25 @@ int ViosockProxyMain(int argc, char *argv[])
 
 	switch (ret) {
 		case -3:
-			fprintf(stderr, "Missing argument for command-line option \"%s\"\n", *(arg - 1));
+			LogError("Missing argument for command-line option \"%s\"", *(arg - 1));
 			return ret;
 			break;
 		case -4:
-			fprintf(stderr, "Unknown command-line option \"%s\"\n", *(arg - 1));
+			LogError("Unknown command-line option \"%s\"", *(arg - 1));
 			return ret;
 			break;
 		default:
 			break;
 	}
+
+	return ret;
+}
+
+
+
+int ViosockProxyMain(void)
+{
+	int ret = 0;
 
 	if (_help) {
 		usage();
