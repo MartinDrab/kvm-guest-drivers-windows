@@ -18,7 +18,7 @@
     <ClCompile Include="logging.c">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="viosshd.c">
+    <ClCompile Include="vioproxy.c">
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="service.c">
@@ -41,7 +41,7 @@
     <ClInclude Include="logging.h">
       <Filter>Header Files</Filter>
     </ClInclude>
-    <ClInclude Include="viosshd.h">
+    <ClInclude Include="vioproxy.h">
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="compat-header.h">
@@ -61,7 +61,7 @@
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="viosshd.rc">
+    <ResourceCompile Include="vioproxy.rc">
       <Filter>Resource Files</Filter>
     </ResourceCompile>
   </ItemGroup>

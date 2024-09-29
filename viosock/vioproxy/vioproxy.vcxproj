@@ -32,7 +32,7 @@
     <ClCompile Include="stderr-thread.c" />
     <ClCompile Include="thread-context.c" />
     <ClCompile Include="utils.c" />
-    <ClCompile Include="viosshd.c" />
+    <ClCompile Include="vioproxy.c" />
     <ClCompile Include="win-utils.c" />
   </ItemGroup>
   <ItemGroup>
@@ -41,7 +41,7 @@
     <ClInclude Include="stderr-thread.h" />
     <ClInclude Include="thread-context.h" />
     <ClInclude Include="utils.h" />
-    <ClInclude Include="viosshd.h" />
+    <ClInclude Include="vioproxy.h" />
     <ClInclude Include="win-utils.h" />
   </ItemGroup>
   <ItemGroup>
@@ -49,7 +49,7 @@
     <FilesToPackage Include="$(OutDir)$(TargetName).pdb" />
   </ItemGroup>
   <ItemGroup>
-    <ResourceCompile Include="viosshd.rc" />
+    <ResourceCompile Include="vioproxy.rc" />
   </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>17.0</VCProjectVersion>
@@ -57,7 +57,7 @@
     <ProjectGuid>{2a22423b-0199-4d6e-9cf2-8574c9060bf3}</ProjectGuid>
     <RootNamespace>viosockproxy</RootNamespace>
     <WindowsTargetPlatformVersion>$(LatestTargetPlatformVersion)</WindowsTargetPlatformVersion>
-    <ProjectName>viosshd</ProjectName>
+    <ProjectName>vioproxy</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Win10 Release|Win32'" Label="Configuration">

@@ -2,7 +2,7 @@
 #include "compat-header.h"
 #include "logging.h"
 #include "win-utils.h"
-#include "viosshd.h"
+#include "vioproxy.h"
 #include "stderr-thread.h"
 
 

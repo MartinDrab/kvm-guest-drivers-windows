@@ -33,7 +33,7 @@ VirtioSocket_Lib_CopyFiles = 11
 viosock.sys  = 1,,
 viosocklib.dll = 1
 viosockwspsvc.exe = 1
-viosshd.exe = 1
+vioproxy.exe = 1
 
 [SourceDisksNames]
 1 = %DiskId1%,,,""
@@ -71,7 +71,7 @@ viosock.sys
 [VirtioSocket_Lib_CopyFiles]
 viosocklib.dll
 viosockwspsvc.exe
-viosshd.exe
+vioproxy.exe
 
 ;-------------- Service installation
 
@@ -102,7 +102,7 @@ DisplayName    = %VirtioSSHD.ServiceDesc%
 ServiceType    = 0x10            ; SERVICE_WIN32_OWN_PROCESS
 StartType      = 2               ; SERVICE_AUTO_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %11%\viosshd.exe ap -d vsock://-1:22 -D \"sshd -i\" --log-info --log-packet
+ServiceBinary  = %11%\vioproxy.exe ap -d vsock://-1:22 -D \"sshd -i\" --log-info --log-packet
 
 ;--- VirtioSocket_Device WDF ------
 ;

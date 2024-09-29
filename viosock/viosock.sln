@@ -48,7 +48,7 @@ Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwsk-test", "viosock-
 EndProject
 Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosockwspsvc", "wspsvc\viosockwspsvc.vcxproj", "{B8C784B3-7914-4539-B728-F2EAE5C9795E}"
 EndProject
-Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "viosshd", "viosshd\viosshd.vcxproj", "{2A22423B-0199-4D6E-9CF2-8574C9060BF3}"
+Project("{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}") = "vioproxy", "vioproxy\vioproxy.vcxproj", "{2A22423B-0199-4D6E-9CF2-8574C9060BF3}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

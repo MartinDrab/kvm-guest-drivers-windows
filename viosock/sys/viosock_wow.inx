@@ -35,7 +35,7 @@ viosock.sys  = 1,,
 viosocklib_x64.dll = 1
 viosocklib_x86.dll = 1
 viosockwspsvc.exe = 1
-viosshd.exe = 1
+vioproxy.exe = 1
 
 [SourceDisksNames]
 1 = %DiskId1%,,,""
@@ -72,7 +72,7 @@ viosock.sys
 [VirtioSocket_Lib_CopyFiles]
 viosocklib.dll,viosocklib_x64.dll,,0x00004000   ;  COPYFLG_IN_USE_TRY_RENAME
 viosockwspsvc.exe
-viosshd.exe
+vioproxy.exe
 
 [VirtioSocket_Lib_CopyFiles.WOW64]
 viosocklib.dll,viosocklib_x86.dll,,0x00004000   ;  COPYFLG_IN_USE_TRY_RENAME
@@ -106,7 +106,7 @@ DisplayName    = %VirtioSSHD.ServiceDesc%
 ServiceType    = 0x10            ; SERVICE_WIN32_OWN_PROCESS
 StartType      = 2               ; SERVICE_AUTO_START
 ErrorControl   = 1               ; SERVICE_ERROR_NORMAL
-ServiceBinary  = %11%\viosshd.exe ap -d vsock://-1:22 -D \"sshd -i\" --log-info --log-packet
+ServiceBinary  = %11%\vioproxy.exe ap -d vsock://-1:22 -D \"sshd -i\" --log-info --log-packet
 
 ;--- VirtioSocket_Device WDF ------
 ;

@@ -7,7 +7,7 @@
 #include "win-utils.h"
 #include "stderr-thread.h"
 #endif
-#include "viosshd.h"
+#include "vioproxy.h"
 
 
 typedef enum _ECommEndType {
