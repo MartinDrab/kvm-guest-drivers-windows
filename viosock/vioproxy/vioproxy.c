@@ -764,6 +764,10 @@ void usage(void)
 	LogInfo("  ac - accept connection from the source, make connection to the target");
 	LogInfo("  ca - make connection to the source, accept connection from the target");
 	LogInfo("  cc - connect to both source and target");
+#ifdef _WIN32
+	LogInfo("  ap - run the target process on accepting a connection");
+	LogInfo("  cp - connect to the source and run the target process");
+#endif
 	LogInfo("The connection to the target is established only after the source connection");
 	LogInfo("Options:\n");
 	for (const COMMAND_LINE_OPTION *c = _cmdOptions; c->Type != otUnknown; c++) {

@@ -4,8 +4,12 @@ CFLAGS += -Wall --std=gnu99 -DNDEBUG -Wno-unused-function
 OBJDIR=./obj
 
 OBJ=\
-	$(OBJDIR)/logging.o	\
-	$(OBJDIR)/netpipe.o	\
+	$(OBJDIR)/logging.o		\
+	$(OBJDIR)/utils.o		\
+	$(OBJDIR)/thread-context.c	\
+	$(OBJDIR)/service.o		\
+	$(OBJDIR)/vioproxy.o		\
+	\
 
 .PHONY: all
 all: $(TARGET)
