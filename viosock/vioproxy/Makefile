@@ -1,4 +1,4 @@
-TARGET=netpipe
+TARGET=vioproxy
 CFLAGS ?= -O3 -pipe
 CFLAGS += -Wall --std=gnu99 -DNDEBUG -Wno-unused-function
 OBJDIR=./obj
@@ -6,7 +6,7 @@ OBJDIR=./obj
 OBJ=\
 	$(OBJDIR)/logging.o		\
 	$(OBJDIR)/utils.o		\
-	$(OBJDIR)/thread-context.c	\
+	$(OBJDIR)/thread-context.o	\
 	$(OBJDIR)/service.o		\
 	$(OBJDIR)/vioproxy.o		\
 	\

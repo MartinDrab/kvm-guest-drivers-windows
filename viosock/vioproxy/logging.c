@@ -7,7 +7,9 @@
 #include <stdint.h>
 #include <stdarg.h>
 #include <sys/types.h>
+#ifdef _WIN32
 #include <windows.h>
+#endif
 #include "logging.h"
 
 
@@ -30,10 +32,14 @@ void LogMsg(uint32_t Level, const char *Format, ...)
 		memset(msg, 0, sizeof(msg));
 		va_start(vs, Format);
 		vsnprintf(msg, sizeof(msg), Format, vs);
+#ifdef _WIN32
 		if (!_debugger) {
+#endif
 			fputs(msg, _logStream);
 			fflush(_logStream);
+#ifdef _WIN32
 		} else OutputDebugStringA(msg);
+#endif
 		
 		va_end(vs);
 	}

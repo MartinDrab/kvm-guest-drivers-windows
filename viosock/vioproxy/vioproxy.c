@@ -50,7 +50,7 @@ static char *_logFile = NULL;
 volatile int _terminated = 0;
 
 
-static int _StreamData(PCHANNEL_DATA Data, BOOLEAN ReadPending, DWORD BytesRead)
+static int _StreamData(PCHANNEL_DATA Data, int ReadPending, uint32_t BytesRead)
 {
 	int ret = 0;
 	ssize_t len = 0;
@@ -117,8 +117,8 @@ static int _StreamData(PCHANNEL_DATA Data, BOOLEAN ReadPending, DWORD BytesRead)
 static void _ProcessChannel(PCHANNEL_DATA Data)
 {
 	int ret = 0;
-	BOOLEAN isPending = FALSE;
-	DWORD bytesRead = 0;
+	int isPending = 0;
+	uint32_t bytesRead = 0;
 	struct timeval tv;
 #ifdef _WIN32
 	WSAEVENT readEvent = WSA_INVALID_EVENT;
@@ -152,7 +152,7 @@ static void _ProcessChannel(PCHANNEL_DATA Data)
 #ifdef _WIN32
 			ret = 0;
 			bytesRead = 0;
-			isPending = FALSE;
+			isPending = 0;
 			if (Data->SourcePipe) {				
 				memset(&Data->SourceOverlapped, 0, sizeof(Data->SourceOverlapped));
 				Data->SourceOverlapped.hEvent = readEvent;

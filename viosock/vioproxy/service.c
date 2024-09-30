@@ -60,7 +60,7 @@ static void WINAPI _ServiceMain(_In_ DWORD  dwArgc, _In_ char** lpszArgv)
 #endif
 
 
-int __cdecl main(int argc, char** argv)
+int main(int argc, char** argv)
 {
 	int ret = 0;
 
