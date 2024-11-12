@@ -349,7 +349,7 @@ VirtIoFindAdapter(
     ConfigInfo->Dma32BitAddresses      = TRUE;
     ConfigInfo->Dma64BitAddresses      = SCSI_DMA64_MINIPORT_FULL64BIT_SUPPORTED;
     ConfigInfo->WmiDataProvider        = FALSE;
-    ConfigInfo->AlignmentMask          = 0x3;
+    ConfigInfo->AlignmentMask          = FILE_512_BYTE_ALIGNMENT;
     ConfigInfo->MapBuffers             = STOR_MAP_NON_READ_WRITE_BUFFERS;
     ConfigInfo->SynchronizationModel   = StorSynchronizeFullDuplex;
     ConfigInfo->HwMSInterruptRoutine   = VirtIoMSInterruptRoutine;
