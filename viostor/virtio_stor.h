@@ -247,6 +247,8 @@ typedef struct _ADAPTER_EXTENSION {
     REQUEST_LIST          processing_srbs[MAX_CPU];
     BOOLEAN               reset_in_progress;
     ULONGLONG             fw_ver;
+    STOR_DPC              DeferredSrbCompletionDpc;
+    SLIST_HEADER          DefferredSrbList;
 #ifdef DBG
     LONG                  srb_cnt;
     LONG                  inqueue_cnt;
@@ -262,6 +264,18 @@ typedef struct _VRING_DESC_ALIAS
     }u;
 }VRING_DESC_ALIAS;
 
+#define SRB_ALIGNED_BUFFER_TAG          (ULONG)'AVlA'
+
+typedef struct _SRB_ALIGNED_BUFFER {
+    PVOID OriginalVA;
+    PVOID AlignedVA;
+    PHYSICAL_ADDRESS AlignedPA;
+    PHYSICAL_ADDRESS SGPA;
+    PVOID SGVA;
+    ULONG Length;
+    BOOLEAN ReadOperation;
+} SRB_ALIGNED_BUFFER, *PSRB_ALIGNED_BUFFER;
+
 typedef struct _SRB_EXTENSION {
     blk_req               vbr;
     ULONG                 out;
@@ -270,6 +284,9 @@ typedef struct _SRB_EXTENSION {
     BOOLEAN               fua;
     VIO_SG                sg[VIRTIO_MAX_SG];
     VRING_DESC_ALIAS      desc[VIRTIO_MAX_SG];
+    SRB_ALIGNED_BUFFER    aligned[VIRTIO_MAX_SG];
+    PVOID                 Srb;
+    SLIST_ENTRY           DeferredEntry;
 }SRB_EXTENSION, *PSRB_EXTENSION;
 
 BOOLEAN

@@ -49,6 +49,7 @@ HW_ADAPTER_CONTROL   VirtIoAdapterControl;
 HW_INTERRUPT         VirtIoInterrupt;
 HW_BUILDIO           VirtIoBuildIo;
 HW_DPC_ROUTINE       CompleteDpcRoutine;
+HW_DPC_ROUTINE       FreeDpcRoutine;
 HW_MESSAGE_SIGNALED_INTERRUPT_ROUTINE VirtIoMSInterruptRoutine;
 HW_PASSIVE_INITIALIZE_ROUTINE         VirtIoPassiveInitializeRoutine;
 
@@ -81,7 +82,17 @@ CompleteDpcRoutine(
     IN PVOID Context,
     IN PVOID SystemArgument1,
     IN PVOID SystemArgument2
-    ) ;
+    );
+
+VOID
+FreeDpcRoutine(
+    IN PSTOR_DPC  Dpc,
+    IN PVOID Context,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+    );
+
+
 BOOLEAN
 VirtIoMSInterruptRoutine (
     IN PVOID  DeviceExtension,
@@ -349,7 +360,7 @@ VirtIoFindAdapter(
     ConfigInfo->Dma32BitAddresses      = TRUE;
     ConfigInfo->Dma64BitAddresses      = SCSI_DMA64_MINIPORT_FULL64BIT_SUPPORTED;
     ConfigInfo->WmiDataProvider        = FALSE;
-    ConfigInfo->AlignmentMask          = FILE_512_BYTE_ALIGNMENT;
+    ConfigInfo->AlignmentMask          = FILE_LONG_ALIGNMENT;
     ConfigInfo->MapBuffers             = STOR_MAP_NON_READ_WRITE_BUFFERS;
     ConfigInfo->SynchronizationModel   = StorSynchronizeFullDuplex;
     ConfigInfo->HwMSInterruptRoutine   = VirtIoMSInterruptRoutine;
@@ -585,12 +596,21 @@ VirtIoPassiveInitializeRoutine (
 {
     ULONG index;
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
-    for (index = 0; index < adaptExt->num_queues; ++index) {
-        StorPortInitializeDpc(DeviceExtension,
-            &adaptExt->dpc[index],
-            CompleteDpcRoutine);
+
+    if (adaptExt->dpc_ok == FALSE) {
+        for (index = 0; index < adaptExt->num_queues; ++index) {
+            StorPortInitializeDpc(DeviceExtension,
+                &adaptExt->dpc[index],
+                CompleteDpcRoutine);
+        }
     }
+
+    StorPortInitializeDpc(DeviceExtension,
+        &adaptExt->DeferredSrbCompletionDpc,
+        FreeDpcRoutine);
+
     adaptExt->dpc_ok = TRUE;
+
     return TRUE;
 }
 
@@ -818,14 +838,15 @@ VirtIoHwInitialize(
     }
 
     if (!adaptExt->dump_mode) {
+        InitializeSListHead(&adaptExt->DefferredSrbList);
         if (adaptExt->dpc == NULL) {
             adaptExt->dpc = (PSTOR_DPC)VioStorPoolAlloc(DeviceExtension, sizeof(STOR_DPC) * adaptExt->num_queues);
-        }
-        if ((adaptExt->dpc != NULL) && (adaptExt->dpc_ok == FALSE)) {
-            ret = StorPortEnablePassiveInitialization(DeviceExtension, VirtIoPassiveInitializeRoutine);
+            ret = (adaptExt->dpc != NULL);
+            if (ret)
+                StorPortEnablePassiveInitialization(DeviceExtension, VirtIoPassiveInitializeRoutine);
         }
     }
-
+    
     if (ret) {
         virtio_device_ready(&adaptExt->vdev);
     } else {
@@ -899,7 +920,7 @@ VirtIoStartIo(
 
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     SRB_SET_SCSI_STATUS(((PSRB_TYPE)Srb), ScsiStatus);
-
+ 
     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Srb = 0x%p\n", Srb);
 
     switch (SRB_FUNCTION(Srb)) {
@@ -1288,6 +1309,7 @@ VirtIoBuildIo(
     }
 
     RtlZeroMemory(srbExt, sizeof(*srbExt));
+    srbExt->Srb = Srb;
 
     if (SRB_FUNCTION(Srb) != SRB_FUNCTION_EXECUTE_SCSI )
     {
@@ -1348,6 +1370,44 @@ VirtIoBuildIo(
     for (i = 0, sgElement = 1; i < sgMaxElements; i++, sgElement++) {
         srbExt->sg[sgElement].physAddr = sgList->List[i].PhysicalAddress;
         srbExt->sg[sgElement].length   = sgList->List[i].Length;
+        if ((srbExt->sg[sgElement].physAddr.QuadPart & (PAGE_SIZE - 1)) != 0 &&
+            srbExt->sg[sgElement].length < PAGE_SIZE &&
+            !adaptExt->dump_mode) {
+            PSRB_ALIGNED_BUFFER ab = srbExt->aligned + sgElement;
+            ULONG srbStatus = SRB_STATUS_SUCCESS;
+
+            srbStatus = StorPortAllocatePool(DeviceExtension, 2*PAGE_SIZE, SRB_ALIGNED_BUFFER_TAG, &ab->OriginalVA);
+            if (srbStatus != STOR_STATUS_SUCCESS) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, " StorPortAllocatePool: 0x%x\n", srbStatus);
+                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, (UCHAR)srbStatus);
+                return FALSE;
+            }
+            
+            ab->AlignedVA = (PVOID)(((ULONG_PTR)ab->OriginalVA + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+            ab->AlignedPA = StorPortGetPhysicalAddress(DeviceExtension, NULL, ab->AlignedVA, &dummy);
+            if (ab->AlignedPA.QuadPart == 0) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, " No physical address for 0x%p\n", ab->AlignedVA);
+                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+                return FALSE;
+            }
+            
+            ab->SGPA = sgList->List[i].PhysicalAddress;
+            ab->Length = sgList->List[i].Length;
+            srbExt->sg[sgElement].physAddr = ab->AlignedPA;
+            ab->SGVA = MmMapIoSpace(ab->SGPA, ab->Length, MmNonCached);
+            if (ab->SGVA == NULL) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, " MmMapIoSpace failed for 0x%llx\n", sgList->List[i].PhysicalAddress.QuadPart);
+                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+                return FALSE;
+            }
+
+            ab->ReadOperation = (SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == 0;
+            if (!ab->ReadOperation) {
+                StorPortCopyMemory(ab->AlignedVA, ab->SGVA, ab->Length);
+                MmUnmapIoSpace(ab->SGVA, ab->Length);
+                ab->SGVA = NULL;
+            }
+        }
     }
 
     srbExt->vbr.out_hdr.sector = lba;
@@ -1370,6 +1430,10 @@ VirtIoBuildIo(
 
     srbExt->sg[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.status, &dummy);
     srbExt->sg[sgElement].length = sizeof(srbExt->vbr.status);
+    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p, LBA = 0x%llx\n", Srb, lba);
+    for (i = 0; i < sgMaxElements + 2; ++i) {
+        RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p:%u, addr=0x%llx, len=%u\n", Srb, i, srbExt->sg[i].physAddr.QuadPart, srbExt->sg[i].length);
+    }
 
     return TRUE;
 }
@@ -1824,13 +1888,47 @@ CompleteSRB(
     IN PSRB_TYPE Srb
     )
 {
+    BOOLEAN deferCompletion = FALSE;
+    PSRB_EXTENSION srbExt = SRB_EXTENSION(Srb);
     PADAPTER_EXTENSION adaptExt= (PADAPTER_EXTENSION)DeviceExtension;
+
 #ifdef DBG
     InterlockedDecrement((LONG volatile*)&adaptExt->srb_cnt);
 #endif
-    StorPortNotification(RequestComplete,
+    for (size_t i = 0; i < sizeof(srbExt->aligned)/sizeof(srbExt->aligned[0]); ++i) {
+        PSRB_ALIGNED_BUFFER ab = srbExt->aligned + i;
+
+        if (ab->OriginalVA != NULL) {
+            if (KeGetCurrentIrql() <= DISPATCH_LEVEL) {
+                if (ab->ReadOperation &&
+                    ab->SGVA != NULL) {
+                    StorPortCopyMemory(ab->SGVA, ab->AlignedVA, ab->Length);
+                    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p: Copied %u bytes of data\n", Srb, ab->Length);
+                }
+
+                if (ab->SGVA != NULL)
+                    MmUnmapIoSpace(ab->SGVA, ab->Length);
+
+                StorPortFreePool(DeviceExtension, ab->OriginalVA);
+            } else {
+                deferCompletion = TRUE;
+                RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: IRQL too high (%u), deferring\n", Srb, KeGetCurrentIrql());
+            }
+        }
+    }
+
+    if (!deferCompletion) {
+        RtlZeroMemory(srbExt->aligned, sizeof(srbExt->aligned));
+        StorPortNotification(RequestComplete,
                          DeviceExtension,
                          Srb);
+    } else {
+        InterlockedPushEntrySList(&adaptExt->DefferredSrbList, &srbExt->DeferredEntry);
+        StorPortIssueDpc(DeviceExtension,
+            &adaptExt->DeferredSrbCompletionDpc,
+            DeviceExtension,
+            NULL);
+    }
 }
 
 VOID
@@ -1860,6 +1958,10 @@ CompleteRequestWithStatus(
         }
     }
     SRB_SET_SRB_STATUS(Srb, status);
+    if (status != SRB_STATUS_SUCCESS) {
+        RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: Failed with status 0x%x\n", Srb, status);
+    }
+
     CompleteSRB(DeviceExtension,
                 Srb);
 }
@@ -2111,6 +2213,28 @@ CompleteDpcRoutine(
 {
     ULONG MessageID = PtrToUlong(SystemArgument1);
     VioStorCompleteRequest(Context, MessageID, FALSE);
+}
+
+#pragma warning(disable: 4100 4701)
+VOID
+FreeDpcRoutine(
+    IN PSTOR_DPC  Dpc,
+    IN PVOID Context,
+    IN PVOID SystemArgument1,
+    IN PVOID SystemArgument2
+)
+{
+    PSRB_EXTENSION srbExt = NULL;
+    PSLIST_ENTRY entry = NULL;
+    PADAPTER_EXTENSION adptExt = (PADAPTER_EXTENSION)SystemArgument1;
+
+    while (entry = InterlockedPopEntrySList(&adptExt->DefferredSrbList)) {
+        srbExt = CONTAINING_RECORD(entry, SRB_EXTENSION, DeferredEntry);
+        RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Finishing Srb 0x%p\n", srbExt->Srb);
+        CompleteSRB(adptExt, srbExt->Srb);
+    }
+
+    return;
 }
 
 VOID
