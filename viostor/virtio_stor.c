@@ -1430,7 +1430,7 @@ VirtIoBuildIo(
 
     srbExt->sg[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.status, &dummy);
     srbExt->sg[sgElement].length = sizeof(srbExt->vbr.status);
-    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p, LBA = 0x%llx\n", Srb, lba);
+    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p, LBA = 0x%llx, flags = 0x%x\n", Srb, lba, SRB_FLAGS(Srb));
     for (i = 0; i < sgMaxElements + 2; ++i) {
         RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p:%u, addr=0x%llx, len=%u\n", Srb, i, srbExt->sg[i].physAddr.QuadPart, srbExt->sg[i].length);
     }
@@ -1904,6 +1904,8 @@ CompleteSRB(
                     ab->SGVA != NULL) {
                     StorPortCopyMemory(ab->SGVA, ab->AlignedVA, ab->Length);
                     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p: Copied %u bytes of data\n", Srb, ab->Length);
+                } else {
+                    RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: Nothing copied, VA 0x%p\n", Srb, ab->SGVA);
                 }
 
                 if (ab->SGVA != NULL)
@@ -2180,8 +2182,8 @@ VioStorCompleteRequest(
             if (bFound && Srb) {
                 srbExt = SRB_EXTENSION(Srb);
                 srbStatus = DeviceToSrbStatus(vbr->status);
-                RhelDbgPrint(TRACE_LEVEL_INFORMATION, " srb %p, QueueNumber %lu, MessageId %lu.\n",
-                    Srb, QueueNumber, MessageID);
+                RhelDbgPrint(TRACE_LEVEL_INFORMATION, " srb %p, Srb->status %u, vbr->status %u.\n",
+                    Srb, srbStatus, vbr->status);
                 if (srbExt && srbExt->fua == TRUE) {
                     SRB_SET_SRB_STATUS(Srb, SRB_STATUS_PENDING);
                     if (!RhelDoFlush(DeviceExtension, Srb, TRUE, bIsr)) {

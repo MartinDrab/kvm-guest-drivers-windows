@@ -78,6 +78,8 @@ RhelDoFlush(
     struct virtqueue    *vq = NULL;
     PREQUEST_LIST       element;
 
+    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " flush srb=0x%p, resend=%u\n", Srb, resend);
+
     SET_VA_PA();
 
     if (resend) {
