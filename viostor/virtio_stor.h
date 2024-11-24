@@ -272,8 +272,11 @@ typedef struct _SRB_ALIGNED_BUFFER {
     PHYSICAL_ADDRESS AlignedPA;
     PHYSICAL_ADDRESS SGPA;
     PVOID SGVA;
+    ULONG SGLength;
     ULONG Length;
     BOOLEAN ReadOperation;
+    BOOLEAN BadLength;
+    BOOLEAN Mapped;
 } SRB_ALIGNED_BUFFER, *PSRB_ALIGNED_BUFFER;
 
 typedef struct _SRB_EXTENSION {

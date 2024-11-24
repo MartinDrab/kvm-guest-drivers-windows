@@ -1366,48 +1366,114 @@ VirtIoBuildIo(
     }
 
     sgMaxElements = min((MAX_PHYS_SEGMENTS + 1), sgList->NumberOfElements);
+    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p, LBA = 0x%llx, flags = 0x%x\n", Srb, lba, SRB_FLAGS(Srb));
+    for (i = 0; i < sgList->NumberOfElements; ++i) {
+        RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p:%u, addr=0x%llx, len=%u\n", Srb, i, sgList->List[i].PhysicalAddress.QuadPart, sgList->List[i].Length);
+    }
 
-    for (i = 0, sgElement = 1; i < sgMaxElements; i++, sgElement++) {
+    BOOLEAN lengthUnaligned = FALSE;
+
+    if (!adaptExt->dump_mode) {
+        for (i = 0; i < sgMaxElements; ++i) {
+            if ((sgList->List[i].Length & (0x200 - 1)) != 0)
+                lengthUnaligned = TRUE;
+        }
+    }
+
+    for (i = 0, sgElement = 1; i < sgMaxElements; i++) {
         srbExt->sg[sgElement].physAddr = sgList->List[i].PhysicalAddress;
         srbExt->sg[sgElement].length   = sgList->List[i].Length;
-        if ((srbExt->sg[sgElement].physAddr.QuadPart & (PAGE_SIZE - 1)) != 0 &&
-            srbExt->sg[sgElement].length < PAGE_SIZE &&
-            !adaptExt->dump_mode) {
-            PSRB_ALIGNED_BUFFER ab = srbExt->aligned + sgElement;
-            ULONG srbStatus = SRB_STATUS_SUCCESS;
-
-            srbStatus = StorPortAllocatePool(DeviceExtension, 2*PAGE_SIZE, SRB_ALIGNED_BUFFER_TAG, &ab->OriginalVA);
-            if (srbStatus != STOR_STATUS_SUCCESS) {
-                RhelDbgPrint(TRACE_LEVEL_ERROR, " StorPortAllocatePool: 0x%x\n", srbStatus);
-                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, (UCHAR)srbStatus);
-                return FALSE;
-            }
-            
-            ab->AlignedVA = (PVOID)(((ULONG_PTR)ab->OriginalVA + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
-            ab->AlignedPA = StorPortGetPhysicalAddress(DeviceExtension, NULL, ab->AlignedVA, &dummy);
-            if (ab->AlignedPA.QuadPart == 0) {
-                RhelDbgPrint(TRACE_LEVEL_ERROR, " No physical address for 0x%p\n", ab->AlignedVA);
-                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
-                return FALSE;
-            }
-            
-            ab->SGPA = sgList->List[i].PhysicalAddress;
-            ab->Length = sgList->List[i].Length;
-            srbExt->sg[sgElement].physAddr = ab->AlignedPA;
-            ab->SGVA = MmMapIoSpace(ab->SGPA, ab->Length, MmNonCached);
-            if (ab->SGVA == NULL) {
-                RhelDbgPrint(TRACE_LEVEL_ERROR, " MmMapIoSpace failed for 0x%llx\n", sgList->List[i].PhysicalAddress.QuadPart);
-                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
-                return FALSE;
-            }
-
-            ab->ReadOperation = (SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == 0;
-            if (!ab->ReadOperation) {
-                StorPortCopyMemory(ab->AlignedVA, ab->SGVA, ab->Length);
-                MmUnmapIoSpace(ab->SGVA, ab->Length);
-                ab->SGVA = NULL;
-            }
+        if (adaptExt->dump_mode) {
+            ++sgElement;
+            continue;
         }
+        
+        if ((srbExt->sg[sgElement].physAddr.QuadPart & (PAGE_SIZE - 1)) != 0 ||
+            lengthUnaligned) {
+            ULONG bytesToProcess = 0;
+            ULONG bytesProcessed = 0;
+            PSRB_ALIGNED_BUFFER baseAb = NULL;
+            ULONG srbStatus = SRB_STATUS_SUCCESS;
+            ULONG lastRemaining = 0;
+
+            bytesToProcess = sgList->List[i].Length;
+            do {
+                PSRB_ALIGNED_BUFFER ab = srbExt->aligned + sgElement;
+
+                ab->ReadOperation = (SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == 0;
+                ab->BadLength = (sgList->List[i].Length & (0x200 - 1)) != 0;
+                srbStatus = StorPortAllocatePool(DeviceExtension, 2*PAGE_SIZE, SRB_ALIGNED_BUFFER_TAG, &ab->OriginalVA);
+                if (srbStatus != STOR_STATUS_SUCCESS) {
+                    RhelDbgPrint(TRACE_LEVEL_ERROR, " StorPortAllocatePool: 0x%x\n", srbStatus);
+                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, (UCHAR)srbStatus);
+                    return FALSE;
+                }
+            
+                ab->AlignedVA = (PVOID)(((ULONG_PTR)ab->OriginalVA + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
+                ab->AlignedPA = StorPortGetPhysicalAddress(DeviceExtension, NULL, ab->AlignedVA, &dummy);
+                if (ab->AlignedPA.QuadPart == 0) {
+                    RhelDbgPrint(TRACE_LEVEL_ERROR, " No physical address for 0x%p\n", ab->AlignedVA);
+                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+                    return FALSE;
+                }
+
+                if (bytesToProcess >= PAGE_SIZE) {
+                    ab->Length = PAGE_SIZE;
+                    bytesToProcess -= PAGE_SIZE;
+                } else {
+                    ab->Length = bytesToProcess;
+                    bytesToProcess = 0;
+                }
+
+                srbExt->sg[sgElement].physAddr = ab->AlignedPA;
+                srbExt->sg[sgElement].length = ab->Length;
+                if (baseAb == NULL) {
+                    ab->SGPA = sgList->List[i].PhysicalAddress;
+                    ab->SGLength = sgList->List[i].Length;
+                    ab->SGVA = MmMapIoSpace(ab->SGPA, ab->SGLength, MmNonCached);
+                    if (ab->SGVA == NULL) {
+                        RhelDbgPrint(TRACE_LEVEL_ERROR, " MmMapIoSpace failed for 0x%llx\n", sgList->List[i].PhysicalAddress.QuadPart);
+                        CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+                        return FALSE;
+                    }
+
+                    ab->Mapped = TRUE;
+                } else {
+                    ab->SGPA.QuadPart = baseAb->SGPA.QuadPart + bytesProcessed;
+                    ab->SGVA = (unsigned char *)baseAb->SGVA + bytesProcessed;
+                    ab->SGLength = ab->Length;
+                }
+
+                if (!ab->ReadOperation) {
+                    ULONG bytesToCopy = lastRemaining;
+
+                    if (lastRemaining > 0) {
+                        PSRB_ALIGNED_BUFFER prev = ab - 1;
+
+                        if (ab->Length < bytesToCopy)
+                            bytesToCopy = ab->Length;
+
+                        StorPortCopyMemory((unsigned char *)prev->AlignedVA + prev->Length, ab->SGVA, bytesToCopy);
+                        ab->Length -= bytesToCopy;
+                        srbExt->sg[sgElement].length -= bytesToCopy;
+                        srbExt->sg[sgElement - 1].length += bytesToCopy;
+                    }
+
+                    if (ab->Length > 0) {
+                        StorPortCopyMemory(ab->AlignedVA, (unsigned char *)ab->SGVA + bytesToCopy, ab->Length);
+                        lastRemaining = PAGE_SIZE - ab->Length;
+                    } else --sgElement;
+                }
+
+                if (baseAb == NULL)
+                    baseAb = ab;
+
+                bytesProcessed += ab->Length;
+                bytesToProcess -= ab->Length;
+                ++ab;
+                ++sgElement;
+            } while (bytesToProcess > 0);
+        } else ++sgElement;
     }
 
     srbExt->vbr.out_hdr.sector = lba;
@@ -1908,8 +1974,8 @@ CompleteSRB(
                     RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: Nothing copied, VA 0x%p\n", Srb, ab->SGVA);
                 }
 
-                if (ab->SGVA != NULL)
-                    MmUnmapIoSpace(ab->SGVA, ab->Length);
+                if (ab->Mapped)
+                    MmUnmapIoSpace(ab->SGVA, ab->SGLength);
 
                 StorPortFreePool(DeviceExtension, ab->OriginalVA);
             } else {
