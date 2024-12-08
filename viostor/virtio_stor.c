@@ -1393,6 +1393,7 @@ VirtIoBuildIo(
             ULONG bytesToProcess = 0;
             ULONG bytesProcessed = 0;
             PSRB_ALIGNED_BUFFER baseAb = NULL;
+            PSRB_ALIGNED_BUFFER prev = NULL;
             ULONG srbStatus = SRB_STATUS_SUCCESS;
             ULONG lastRemaining = 0;
 
@@ -1448,13 +1449,19 @@ VirtIoBuildIo(
                     ULONG bytesToCopy = lastRemaining;
 
                     if (lastRemaining > 0) {
-                        PSRB_ALIGNED_BUFFER prev = ab - 1;
+                        if (prev == NULL)
+                            prev = ab - 1;
 
                         if (ab->Length < bytesToCopy)
                             bytesToCopy = ab->Length;
 
                         StorPortCopyMemory((unsigned char *)prev->AlignedVA + prev->Length, ab->SGVA, bytesToCopy);
                         ab->Length -= bytesToCopy;
+                        memmove(ab->SGVA, (unsigned char *)ab->SGVA + bytesToCopy, ab->Length);
+                        prev->Length += bytesToCopy;
+                        if (prev->Length == PAGE_SIZE)
+                            ++prev;
+
                         srbExt->sg[sgElement].length -= bytesToCopy;
                         srbExt->sg[sgElement - 1].length += bytesToCopy;
                     }
