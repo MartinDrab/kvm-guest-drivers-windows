@@ -41,6 +41,8 @@
 #include "virtio_ring.h"
 #include "virtio_stor_utils.h"
 #include "virtio_stor_hw_helper.h"
+#include "virtio_buffers.h"
+
 
 typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
@@ -264,21 +266,6 @@ typedef struct _VRING_DESC_ALIAS
     }u;
 }VRING_DESC_ALIAS;
 
-#define SRB_ALIGNED_BUFFER_TAG          (ULONG)'AVlA'
-
-typedef struct _SRB_ALIGNED_BUFFER {
-    PVOID OriginalVA;
-    PVOID AlignedVA;
-    PHYSICAL_ADDRESS AlignedPA;
-    PHYSICAL_ADDRESS SGPA;
-    PVOID SGVA;
-    ULONG SGLength;
-    ULONG Length;
-    BOOLEAN ReadOperation;
-    BOOLEAN BadLength;
-    BOOLEAN Mapped;
-} SRB_ALIGNED_BUFFER, *PSRB_ALIGNED_BUFFER;
-
 typedef struct _SRB_EXTENSION {
     blk_req               vbr;
     ULONG                 out;
@@ -287,9 +274,12 @@ typedef struct _SRB_EXTENSION {
     BOOLEAN               fua;
     VIO_SG                sg[VIRTIO_MAX_SG];
     VRING_DESC_ALIAS      desc[VIRTIO_MAX_SG];
-    SRB_ALIGNED_BUFFER    aligned[VIRTIO_MAX_SG];
     PVOID                 Srb;
     SLIST_ENTRY           DeferredEntry;
+    PSRB_ALIGNED_BUFFER SGBuffers;
+    PSRB_ALIGNED_BUFFER AlignedBuffers;
+    ULONG AlignedCount;
+    BOOLEAN ReadOperation : 1;
 }SRB_EXTENSION, *PSRB_EXTENSION;
 
 BOOLEAN

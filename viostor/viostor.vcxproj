@@ -195,6 +195,7 @@
     <Inf Include="viostor.inx" />
   </ItemGroup>
   <ItemGroup>
+    <ClInclude Include="virtio_buffers.h" />
     <ClInclude Include="virtio_stor.h" />
     <ClInclude Include="virtio_stor_hw_helper.h" />
     <ClInclude Include="virtio_stor_trace.h" />
@@ -204,6 +205,7 @@
     <ResourceCompile Include="virtio_stor.rc" />
   </ItemGroup>
   <ItemGroup>
+    <ClCompile Include="virtio_buffers.c" />
     <ClCompile Include="virtio_pci.c" />
     <ClCompile Include="virtio_stor.c" />
     <ClCompile Include="virtio_stor_hw_helper.c" />

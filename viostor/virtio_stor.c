@@ -30,6 +30,7 @@
  * SUCH DAMAGE.
  */
 #include "virtio_stor.h"
+#include "virtio_buffers.h"
 #if defined(EVENT_TRACING)
 #include "virtio_stor.tmh"
 #endif
@@ -1372,115 +1373,59 @@ VirtIoBuildIo(
     }
 
     BOOLEAN lengthUnaligned = FALSE;
+    BOOLEAN paUnaligned = FALSE;
 
+    srbExt->ReadOperation = (SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == 0;
     if (!adaptExt->dump_mode) {
         for (i = 0; i < sgMaxElements; ++i) {
             if ((sgList->List[i].Length & (0x200 - 1)) != 0)
                 lengthUnaligned = TRUE;
+        
+            if ((sgList->List[i].PhysicalAddress.QuadPart & (PAGE_SIZE - 1)) != 0)
+                paUnaligned = TRUE;
+        }
+
+        if (lengthUnaligned || paUnaligned) {
+            ULONG alignFlags = VB_ALIGN_FLAG_KEEP_ALIGNED | VB_ALIGN_FLAG_DONT_MOVE;
+            NTSTATUS status = STATUS_UNSUCCESSFUL;
+
+            status = VBAllocVAs(DeviceExtension, sgList, sgList->NumberOfElements, &srbExt->SGBuffers);
+            if (!NT_SUCCESS(status)) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, "Unable to get VAs for SG list 0x%p: 0x%x\n", sgList, status);
+                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+                return FALSE;
+            }
+
+            if (lengthUnaligned)
+                alignFlags = 0;
+
+            status = VBAllocAligned(DeviceExtension, srbExt->SGBuffers, alignFlags, &srbExt->AlignedBuffers, &srbExt->AlignedCount);
+            if (!NT_SUCCESS(status)) {
+                RhelDbgPrint(TRACE_LEVEL_ERROR, "Unable to align SG list 0x%p: 0x%x\n", sgList, status);
+                CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+                return FALSE;
+            }
+
+            if (!srbExt->ReadOperation)
+                VBCopy(srbExt->SGBuffers, srbExt->AlignedBuffers);
+
+            for (i = 0, sgElement = 1; i < srbExt->AlignedCount; i++) {
+                if (srbExt->AlignedBuffers[i].Length == 0)
+                    continue;
+                
+                srbExt->sg[sgElement].physAddr = srbExt->AlignedBuffers[i].PA;
+                srbExt->sg[sgElement].length = srbExt->AlignedBuffers[i].Length;
+                ++sgElement;
+            }
         }
     }
 
-    for (i = 0, sgElement = 1; i < sgMaxElements; i++) {
-        srbExt->sg[sgElement].physAddr = sgList->List[i].PhysicalAddress;
-        srbExt->sg[sgElement].length   = sgList->List[i].Length;
-        if (adaptExt->dump_mode) {
-            ++sgElement;
-            continue;
+    if (adaptExt->dump_mode ||
+        (!lengthUnaligned && !paUnaligned)) {
+        for (i = 0, sgElement = 1; i < sgMaxElements; i++, sgElement++) {
+            srbExt->sg[sgElement].physAddr = sgList->List[i].PhysicalAddress;
+            srbExt->sg[sgElement].length   = sgList->List[i].Length;
         }
-        
-        if ((srbExt->sg[sgElement].physAddr.QuadPart & (PAGE_SIZE - 1)) != 0 ||
-            lengthUnaligned) {
-            ULONG bytesToProcess = 0;
-            ULONG bytesProcessed = 0;
-            PSRB_ALIGNED_BUFFER baseAb = NULL;
-            PSRB_ALIGNED_BUFFER prev = NULL;
-            ULONG srbStatus = SRB_STATUS_SUCCESS;
-            ULONG lastRemaining = 0;
-
-            bytesToProcess = sgList->List[i].Length;
-            do {
-                PSRB_ALIGNED_BUFFER ab = srbExt->aligned + sgElement;
-
-                ab->ReadOperation = (SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) == 0;
-                ab->BadLength = (sgList->List[i].Length & (0x200 - 1)) != 0;
-                srbStatus = StorPortAllocatePool(DeviceExtension, 2*PAGE_SIZE, SRB_ALIGNED_BUFFER_TAG, &ab->OriginalVA);
-                if (srbStatus != STOR_STATUS_SUCCESS) {
-                    RhelDbgPrint(TRACE_LEVEL_ERROR, " StorPortAllocatePool: 0x%x\n", srbStatus);
-                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, (UCHAR)srbStatus);
-                    return FALSE;
-                }
-            
-                ab->AlignedVA = (PVOID)(((ULONG_PTR)ab->OriginalVA + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1));
-                ab->AlignedPA = StorPortGetPhysicalAddress(DeviceExtension, NULL, ab->AlignedVA, &dummy);
-                if (ab->AlignedPA.QuadPart == 0) {
-                    RhelDbgPrint(TRACE_LEVEL_ERROR, " No physical address for 0x%p\n", ab->AlignedVA);
-                    CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
-                    return FALSE;
-                }
-
-                if (bytesToProcess >= PAGE_SIZE) {
-                    ab->Length = PAGE_SIZE;
-                    bytesToProcess -= PAGE_SIZE;
-                } else {
-                    ab->Length = bytesToProcess;
-                    bytesToProcess = 0;
-                }
-
-                srbExt->sg[sgElement].physAddr = ab->AlignedPA;
-                srbExt->sg[sgElement].length = ab->Length;
-                if (baseAb == NULL) {
-                    ab->SGPA = sgList->List[i].PhysicalAddress;
-                    ab->SGLength = sgList->List[i].Length;
-                    ab->SGVA = MmMapIoSpace(ab->SGPA, ab->SGLength, MmNonCached);
-                    if (ab->SGVA == NULL) {
-                        RhelDbgPrint(TRACE_LEVEL_ERROR, " MmMapIoSpace failed for 0x%llx\n", sgList->List[i].PhysicalAddress.QuadPart);
-                        CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
-                        return FALSE;
-                    }
-
-                    ab->Mapped = TRUE;
-                } else {
-                    ab->SGPA.QuadPart = baseAb->SGPA.QuadPart + bytesProcessed;
-                    ab->SGVA = (unsigned char *)baseAb->SGVA + bytesProcessed;
-                    ab->SGLength = ab->Length;
-                }
-
-                if (!ab->ReadOperation) {
-                    ULONG bytesToCopy = lastRemaining;
-
-                    if (lastRemaining > 0) {
-                        if (prev == NULL)
-                            prev = ab - 1;
-
-                        if (ab->Length < bytesToCopy)
-                            bytesToCopy = ab->Length;
-
-                        StorPortCopyMemory((unsigned char *)prev->AlignedVA + prev->Length, ab->SGVA, bytesToCopy);
-                        ab->Length -= bytesToCopy;
-                        memmove(ab->SGVA, (unsigned char *)ab->SGVA + bytesToCopy, ab->Length);
-                        prev->Length += bytesToCopy;
-                        if (prev->Length == PAGE_SIZE)
-                            ++prev;
-
-                        srbExt->sg[sgElement].length -= bytesToCopy;
-                        srbExt->sg[sgElement - 1].length += bytesToCopy;
-                    }
-
-                    if (ab->Length > 0) {
-                        StorPortCopyMemory(ab->AlignedVA, (unsigned char *)ab->SGVA + bytesToCopy, ab->Length);
-                        lastRemaining = PAGE_SIZE - ab->Length;
-                    } else --sgElement;
-                }
-
-                if (baseAb == NULL)
-                    baseAb = ab;
-
-                bytesProcessed += ab->Length;
-                bytesToProcess -= ab->Length;
-                ++ab;
-                ++sgElement;
-            } while (bytesToProcess > 0);
-        } else ++sgElement;
     }
 
     srbExt->vbr.out_hdr.sector = lba;
@@ -1968,32 +1913,28 @@ CompleteSRB(
 #ifdef DBG
     InterlockedDecrement((LONG volatile*)&adaptExt->srb_cnt);
 #endif
-    for (size_t i = 0; i < sizeof(srbExt->aligned)/sizeof(srbExt->aligned[0]); ++i) {
-        PSRB_ALIGNED_BUFFER ab = srbExt->aligned + i;
-
-        if (ab->OriginalVA != NULL) {
-            if (KeGetCurrentIrql() <= DISPATCH_LEVEL) {
-                if (ab->ReadOperation &&
-                    ab->SGVA != NULL) {
-                    StorPortCopyMemory(ab->SGVA, ab->AlignedVA, ab->Length);
-                    RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p: Copied %u bytes of data\n", Srb, ab->Length);
-                } else {
-                    RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: Nothing copied, VA 0x%p\n", Srb, ab->SGVA);
-                }
-
-                if (ab->Mapped)
-                    MmUnmapIoSpace(ab->SGVA, ab->SGLength);
-
-                StorPortFreePool(DeviceExtension, ab->OriginalVA);
-            } else {
-                deferCompletion = TRUE;
-                RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: IRQL too high (%u), deferring\n", Srb, KeGetCurrentIrql());
-            }
+    if (srbExt->AlignedCount > 0) {
+        if (KeGetCurrentIrql() <= DISPATCH_LEVEL) {
+            if (srbExt->ReadOperation)
+                VBCopy(srbExt->AlignedBuffers, srbExt->SGBuffers);
+        } else {
+            deferCompletion = TRUE;
+            RhelDbgPrint(TRACE_LEVEL_WARNING, " 0x%p: IRQL too high (%u), deferring\n", Srb, KeGetCurrentIrql());
         }
     }
 
     if (!deferCompletion) {
-        RtlZeroMemory(srbExt->aligned, sizeof(srbExt->aligned));
+        if (srbExt->AlignedBuffers != NULL) {
+            VBFree(DeviceExtension, srbExt->AlignedBuffers);
+            srbExt->AlignedBuffers = NULL;
+            srbExt->AlignedCount = 0;
+        }
+
+        if (srbExt->SGBuffers != NULL) {
+            VBFree(DeviceExtension, srbExt->SGBuffers);
+            srbExt->SGBuffers = NULL;
+        }
+
         StorPortNotification(RequestComplete,
                          DeviceExtension,
                          Srb);
