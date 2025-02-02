@@ -97,7 +97,7 @@ SrbGetPnpInfo(_In_ PVOID Srb, ULONG* PnPFlags, ULONG* PnPAction) {
 #define SRB_SET_SCSI_STATUS(Srb, status) SrbSetScsiData(Srb, NULL, NULL, &status, NULL, NULL)
 #define SRB_GET_SCSI_STATUS(Srb, status) SrbGetScsiData(Srb, NULL, NULL, &status, NULL, NULL)
 #define SRB_SET_SRB_STATUS(Srb, status) SrbSetSrbStatus(Srb, status)
-#define SRB_GET_SRB_STATUS(Srb, status) status = SrbSetSrbStatus(Srb)
+#define SRB_GET_SRB_STATUS(Srb, status) status = SrbGetSrbStatus(Srb)
 #define SRB_SET_DATA_TRANSFER_LENGTH(Srb, Len) SrbSetDataTransferLength(Srb, Len)
 #define SRB_GET_TIMEOUTVALUE(Srb) SrbGetTimeOutValue(Srb)
 
