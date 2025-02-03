@@ -351,6 +351,10 @@ VirtIoFindAdapter(
 
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
+    InterlockedExchange(&adaptExt->SrbsTotal, 0);
+    InterlockedExchange(&adaptExt->SrbsUnaligned, 0);
+    InterlockedExchange(&adaptExt->SrbsBadLength, 0);
+
     adaptExt->system_io_bus_number = ConfigInfo->SystemIoBusNumber;
     adaptExt->slot_number = ConfigInfo->SlotNumber;
     adaptExt->dump_mode  = IsCrashDumpMode;
@@ -1381,7 +1385,7 @@ VirtIoBuildIo(
             if ((sgList->List[i].Length & (0x200 - 1)) != 0)
                 lengthUnaligned = TRUE;
         
-            if ((sgList->List[i].PhysicalAddress.QuadPart & (PAGE_SIZE - 1)) != 0)
+            if ((sgList->List[i].PhysicalAddress.QuadPart & (0x200 - 1)) != 0)
                 paUnaligned = TRUE;
         }
 
@@ -1399,7 +1403,7 @@ VirtIoBuildIo(
             if (lengthUnaligned)
                 alignFlags = 0;
 
-            status = VBAllocAligned(DeviceExtension, srbExt->SGBuffers, alignFlags, &srbExt->AlignedBuffers, &srbExt->AlignedCount);
+            status = VBAllocAligned(DeviceExtension, srbExt->SGBuffers, 0x200, alignFlags, &srbExt->AlignedBuffers, &srbExt->AlignedCount);
             if (!NT_SUCCESS(status)) {
                 RhelDbgPrint(TRACE_LEVEL_ERROR, "Unable to align SG list 0x%p: 0x%x\n", sgList, status);
                 CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
@@ -1417,6 +1421,24 @@ VirtIoBuildIo(
                 srbExt->sg[sgElement].length = srbExt->AlignedBuffers[i].Length;
                 ++sgElement;
             }
+
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, " ORIGINAL 0x%p, LBA = 0x%llx, flags = 0x%x, Read = %u\n", Srb, lba, SRB_FLAGS(Srb), srbExt->ReadOperation);
+            for (i = 0; i < sgList->NumberOfElements; ++i) {
+                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, " 0x%p:%u, addr=0x%llx, len=%u\n", Srb, i, sgList->List[i].PhysicalAddress.QuadPart, sgList->List[i].Length);
+            }
+
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, " ALIGNED 0x%p\n", Srb);
+            for (i = 1; i < sgElement + 1; ++i) {
+                DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, " 0x%p:%u, addr=0x%llx, len=%u\n", Srb, i, srbExt->sg[i].physAddr.QuadPart, srbExt->sg[i].length);
+            }
+
+            if (paUnaligned)
+                InterlockedIncrement(&adaptExt->SrbsUnaligned);
+
+            if (lengthUnaligned)
+                InterlockedIncrement(&adaptExt->SrbsBadLength);
+
+            DbgPrintEx(DPFLTR_DEFAULT_ID, DPFLTR_ERROR_LEVEL, "SRBSTATS: Total %u, Unaligned %u, BadLength %u\n", adaptExt->SrbsTotal, adaptExt->SrbsUnaligned, adaptExt->SrbsBadLength);
         }
     }
 
@@ -1452,6 +1474,9 @@ VirtIoBuildIo(
     for (i = 0; i < sgMaxElements + 2; ++i) {
         RhelDbgPrint(TRACE_LEVEL_VERBOSE, " 0x%p:%u, addr=0x%llx, len=%u\n", Srb, i, srbExt->sg[i].physAddr.QuadPart, srbExt->sg[i].length);
     }
+
+    InterlockedIncrement(&adaptExt->SrbsTotal);
+    RhelDbgPrint(TRACE_LEVEL_INFORMATION, "SRBSTATS: Total %u, Unaligned %u, BadLength %u\n", adaptExt->SrbsTotal, adaptExt->SrbsUnaligned, adaptExt->SrbsBadLength);
 
     return TRUE;
 }

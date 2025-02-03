@@ -52,7 +52,7 @@ NTSTATUS VBAllocVAs(PVOID DeviceExtension, const STOR_SCATTER_GATHER_LIST *SGL, 
 }
 
 
-NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers, ULONG Flags, PSRB_ALIGNED_BUFFER *Aligned, PULONG Count)
+NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers, ULONG Alignment, ULONG Flags, PSRB_ALIGNED_BUFFER *Aligned, PULONG Count)
 {
 	ULONG tmpCount = 0;
 	ULONG dummy = 0;
@@ -84,10 +84,10 @@ NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers
 		}
 		
 		if ((Flags & VB_ALIGN_FLAG_KEEP_ALIGNED) == 0 ||
-			(tmp->PA.QuadPart & (PAGE_SIZE - 1)) != 0 ||
+			(tmp->PA.QuadPart & (Alignment - 1)) != 0 ||
 			(tmp->Length & (0x200 -1)) != 0
 			) {
-				const ULONG pageCount = (tmp->Length + PAGE_SIZE - 1) / PAGE_SIZE;
+			const ULONG pageCount = (tmp->Length + PAGE_SIZE - 1) / PAGE_SIZE;
 
 			for (ULONG i = 0; i < pageCount; ++i) {
 				status = StorPortAllocatePool(DeviceExtension, sizeof(SRB_ALIGNED_BUFFER), VIOSTOR_BUFFER_TAG, &ab);
@@ -139,6 +139,8 @@ NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers
 			ab->AllocLength = tmp->AllocLength;
 			ab->Length = tmp->Length;
 			ab->Original = TRUE;
+			InsertTailList(&head, &ab->Entry);
+			++tmpCount;
 		}
 
 		if (currentAB == NULL &&
@@ -162,10 +164,10 @@ NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers
 			while (&ab->Entry != &head) {
 				old = ab;
 				ab = CONTAINING_RECORD(ab->Entry.Flink, SRB_ALIGNED_BUFFER, Entry);
-				StorPortFreePool(DeviceExtension, old);
 				*tmpAligned = *old;
 				tmpAligned->Last = (old->Entry.Flink == &head);
 				++tmpAligned;
+				StorPortFreePool(DeviceExtension, old);
 			}
 		}
 	}

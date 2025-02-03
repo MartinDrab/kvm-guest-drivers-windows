@@ -26,6 +26,6 @@ typedef struct _SRB_ALIGNED_BUFFER {
 #define VB_ALIGN_FLAG_DONT_MOVE					0x2
 
 NTSTATUS VBAllocVAs(PVOID DeviceExtension, const STOR_SCATTER_GATHER_LIST *SGL, ULONG Count, PSRB_ALIGNED_BUFFER *Buffers);
-NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers, ULONG Flags, PSRB_ALIGNED_BUFFER* Aligned, PULONG Count);
+NTSTATUS VBAllocAligned(PVOID DeviceExtension, const SRB_ALIGNED_BUFFER *Buffers, ULONG Alignment, ULONG Flags, PSRB_ALIGNED_BUFFER* Aligned, PULONG Count);
 void VBFree(PVOID DeviceExtension, PSRB_ALIGNED_BUFFER Buffers);
 void VBCopy(const SRB_ALIGNED_BUFFER* Source, PSRB_ALIGNED_BUFFER Dest);

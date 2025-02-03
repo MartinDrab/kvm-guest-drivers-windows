@@ -255,6 +255,9 @@ typedef struct _ADAPTER_EXTENSION {
     LONG                  srb_cnt;
     LONG                  inqueue_cnt;
 #endif
+    volatile LONG         SrbsUnaligned;
+    volatile LONG         SrbsBadLength;
+    volatile LONG         SrbsTotal;
 }ADAPTER_EXTENSION, *PADAPTER_EXTENSION;
 
 typedef struct _VRING_DESC_ALIAS
