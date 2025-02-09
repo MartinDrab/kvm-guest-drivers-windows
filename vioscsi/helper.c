@@ -65,8 +65,11 @@ ENTER_FN_SRB();
     if (!Srb)
         return;
 
+    srbExt = SRB_EXTENSION(Srb);
     if (adaptExt->bRemoved) {
         SRB_SET_SRB_STATUS(Srb, SRB_STATUS_NO_DEVICE);
+        CmdTableDelete(&adaptExt->Cmdtable, srbExt->cmd);
+        CmdTableDereferenceItem(&adaptExt->Cmdtable, srbExt->cmd);
         CompleteRequest(DeviceExtension, Srb);
         return;
     }
@@ -87,19 +90,14 @@ ENTER_FN_SRB();
         }
     }
 
-    srbExt = SRB_EXTENSION(Srb);
-
-    if (!srbExt) {
-        RhelDbgPrint(TRACE_LEVEL_INFORMATION, " No SRB Extenstion for SRB 0x%p \n", Srb);
-        return;
-    }
-
     MessageId = QUEUE_TO_MESSAGE(QueueNumber);
     vq_req_idx = QueueNumber - VIRTIO_SCSI_REQUEST_QUEUE_0;
 
     if (adaptExt->reset_in_progress) {
         RhelDbgPrint(TRACE_LEVEL_FATAL, " Reset is in progress, completing SRB 0x%p with SRB_STATUS_BUS_RESET.\n", Srb);
         SRB_SET_SRB_STATUS(Srb, SRB_STATUS_BUS_RESET);
+        CmdTableDelete(&adaptExt->Cmdtable, srbExt->cmd);
+        CmdTableDereferenceItem(&adaptExt->Cmdtable, srbExt->cmd);
         CompleteRequest(DeviceExtension, Srb);
         return;
     }
@@ -109,7 +107,7 @@ ENTER_FN_SRB();
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               srbExt->psgl,
                                               srbExt->out, srbExt->in,
-                                              &srbExt->cmd, va, pa);
+                                              srbExt->cmd, va, pa);
 
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
@@ -125,6 +123,8 @@ ENTER_FN_SRB();
         RhelDbgPrint(TRACE_LEVEL_WARNING, 
                      " Could not put an SRB into a VQ due to error %s (%i). To be completed with SRB_STATUS_BUSY. QueueNumber = %lu, SRB = 0x%p, Lun = %d, TimeOut = %d.\n", 
                      (add_buffer_req_status == -ENOSPC) ? "ENOSPC" : "UNKNOWN", add_buffer_req_status, QueueNumber, srbExt->Srb, SRB_LUN(Srb), Srb->TimeOutValue);
+        CmdTableDelete(&adaptExt->Cmdtable, srbExt->cmd);
+        CmdTableDereferenceItem(&adaptExt->Cmdtable, srbExt->cmd);
         CompleteRequest(DeviceExtension, Srb);
     }
     VioScsiVQUnlock(DeviceExtension, MessageId, &LockHandle, FALSE);
@@ -152,7 +152,7 @@ ENTER_FN();
     if (virtqueue_add_buf(adaptExt->vq[VIRTIO_SCSI_CONTROL_QUEUE],
                      srbExt->psgl,
                      srbExt->out, srbExt->in,
-                     &srbExt->cmd, va, pa) >= 0){
+                     srbExt->cmd, va, pa) >= 0){
         virtqueue_kick(adaptExt->vq[VIRTIO_SCSI_CONTROL_QUEUE]);
 EXIT_FN();
         return TRUE;
@@ -182,7 +182,7 @@ DeviceReset(
     PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     PSCSI_REQUEST_BLOCK   Srb = &adaptExt->tmf_cmd.Srb;
     PSRB_EXTENSION        srbExt = adaptExt->tmf_cmd.SrbExtension;
-    VirtIOSCSICmd         *cmd = &srbExt->cmd;
+    VirtIOSCSICmd         *cmd = srbExt->cmd;
     ULONG                 fragLen;
     ULONG                 sgElement;
 
@@ -236,6 +236,7 @@ ENTER_FN();
     }
 
     virtio_device_shutdown(&adaptExt->vdev);
+    CmdTableFinit(&adaptExt->Cmdtable);
 EXIT_FN();
 }
 

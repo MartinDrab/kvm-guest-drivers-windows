@@ -172,6 +172,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="helper.h" />
+    <ClInclude Include="cmd-table.h" />
     <ClInclude Include="trace.h" />
     <ClInclude Include="vioscsi.h" />
   </ItemGroup>
@@ -180,6 +181,7 @@
   </ItemGroup>
   <ItemGroup>
     <ClCompile Include="helper.c" />
+    <ClCompile Include="cmd-table.c" />
     <ClCompile Include="utils.c" />
     <ClCompile Include="vioscsi.c" />
     <ClCompile Include="virtio_pci.c" />

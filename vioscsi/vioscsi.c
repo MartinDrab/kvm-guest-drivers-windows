@@ -33,6 +33,7 @@
 #include "helper.h"
 #include "vioscsidt.h"
 #include "trace.h"
+#include "cmd-table.h"
 
 #if defined(EVENT_TRACING)
 #include "vioscsi.tmh"
@@ -456,6 +457,7 @@ ENTER_FN();
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
     RtlZeroMemory(adaptExt, sizeof(ADAPTER_EXTENSION));
 
+    CmdTableInit(&adaptExt->Cmdtable, DeviceExtension);
     adaptExt->dump_mode  = IsCrashDumpMode;
     adaptExt->hba_id     = HBA_ID;
     ConfigInfo->Master                      = TRUE;
@@ -589,6 +591,7 @@ ENTER_FN();
     }
     if (!adaptExt->dump_mode) {
         adaptExt->poolAllocationSize += ROUND_TO_CACHE_LINES(sizeof(SRB_EXTENSION));
+        adaptExt->poolAllocationSize += ROUND_TO_CACHE_LINES(sizeof(VirtIOSCSICmd));
         adaptExt->poolAllocationSize += ROUND_TO_CACHE_LINES(sizeof(VirtIOSCSIEventNode) * 8);
         adaptExt->poolAllocationSize += ROUND_TO_CACHE_LINES(sizeof(STOR_DPC) * max_queues);
     }
@@ -783,6 +786,7 @@ ENTER_FN();
          */
         if (adaptExt->dpc == NULL) {
             adaptExt->tmf_cmd.SrbExtension = (PSRB_EXTENSION)VioScsiPoolAlloc(DeviceExtension, sizeof(SRB_EXTENSION));
+            adaptExt->tmf_cmd.SrbExtension->cmd = (VirtIOSCSICmd *)VioScsiPoolAlloc(DeviceExtension, sizeof(VirtIOSCSICmd));
             adaptExt->events = (PVirtIOSCSIEventNode)VioScsiPoolAlloc(DeviceExtension, sizeof(VirtIOSCSIEventNode) * 8);
             adaptExt->dpc = (PSTOR_DPC)VioScsiPoolAlloc(DeviceExtension, sizeof(STOR_DPC) * adaptExt->num_queues);
         }
@@ -887,6 +891,11 @@ VioScsiStartIo(
 ENTER_FN_SRB();
     if (PreProcessRequest(DeviceExtension, (PSRB_TYPE)Srb))
     {
+        PSRB_EXTENSION srbExt = SRB_EXTENSION(Srb);
+        PADAPTER_EXTENSION adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+
+        CmdTableDelete(&adaptExt->Cmdtable, srbExt->cmd);
+        CmdTableDereferenceItem(&adaptExt->Cmdtable, srbExt->cmd);
         CompleteRequest(DeviceExtension, (PSRB_TYPE)Srb);
     }
     else
@@ -1385,7 +1394,25 @@ ENTER_FN_SRB();
     srbExt->psgl = srbExt->vio_sg;
     srbExt->pdesc = srbExt->desc_alias;
 
-    cmd = &srbExt->cmd;
+    if (CmdTableAllocItem(&adaptExt->Cmdtable, &srbExt->cmd) != STOR_STATUS_SUCCESS) {
+        SRB_SET_SRB_STATUS(Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+        StorPortNotification(RequestComplete,
+            DeviceExtension,
+            Srb);
+        return FALSE;
+    }
+
+    if (CmdTableInsert(&adaptExt->Cmdtable, srbExt->cmd) != STOR_STATUS_SUCCESS) {
+        CmdTableDereferenceItem(&adaptExt->Cmdtable, srbExt->cmd);
+        srbExt->cmd = NULL;
+        SRB_SET_SRB_STATUS(Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+        StorPortNotification(RequestComplete,
+            DeviceExtension,
+            Srb);
+        return FALSE;
+    }
+
+    cmd = srbExt->cmd;
     cmd->srb = (PVOID)Srb;
     cmd->req.cmd.lun[0] = 1;
     cmd->req.cmd.lun[1] = TargetId;
@@ -1512,9 +1539,17 @@ ENTER_FN();
             PLIST_ENTRY le = NULL;
             BOOLEAN bFound = FALSE;
 
-            Srb = (PSRB_TYPE)(cmd->srb);
-            if (!Srb)
+            if (!CmdTableDelete(&adaptExt->Cmdtable, cmd)) {
+                RhelDbgPrint(TRACE_LEVEL_WARNING, " cmd buffer 0x%p not in cmd table\n", cmd);
                 continue;
+            }
+
+            Srb = (PSRB_TYPE)(cmd->srb);
+            if (!Srb) {
+                RhelDbgPrint(TRACE_LEVEL_WARNING, " cmd buffer 0x%p has NULL Srb\n", cmd);
+                CmdTableDereferenceItem(&adaptExt->Cmdtable, cmd);
+                continue;
+            }
 
             srbExt = SRB_EXTENSION(Srb);
             for (le = element->srb_list.Flink; le != &element->srb_list && !bFound; le = le->Flink)
@@ -1533,6 +1568,8 @@ ENTER_FN();
             if (bFound) {
                 HandleResponse(DeviceExtension, cmd);
             }
+
+            CmdTableDereferenceItem(&adaptExt->Cmdtable, cmd);
         }
     } while (!virtqueue_enable_cb(vq));
 
@@ -1661,20 +1698,23 @@ PreProcessRequest(
     IN PSRB_TYPE Srb
     )
 {
-    PADAPTER_EXTENSION adaptExt;
+    BOOLEAN ret = FALSE;
+    PSRB_EXTENSION srbExt = NULL;
+    PADAPTER_EXTENSION adaptExt = NULL;
 
 ENTER_FN_SRB();
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    srbExt = SRB_EXTENSION(Srb);
 
     switch (SRB_FUNCTION(Srb)) {
         case SRB_FUNCTION_PNP:
             SRB_SET_SRB_STATUS(Srb, VioScsiProcessPnP(DeviceExtension, Srb));
-            return TRUE;
-
+            ret = TRUE;
+            break;
         case SRB_FUNCTION_POWER:
             SRB_SET_SRB_STATUS(Srb, SRB_STATUS_SUCCESS);
-            return TRUE;
-
+            ret = TRUE;
+            break;
         case SRB_FUNCTION_RESET_BUS:
         case SRB_FUNCTION_RESET_DEVICE:
         case SRB_FUNCTION_RESET_LOGICAL_UNIT:
@@ -1684,25 +1724,31 @@ ENTER_FN_SRB();
                     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Completing all pending SRBs\n");
                     CompletePendingRequests(DeviceExtension);
                     SRB_SET_SRB_STATUS(Srb, SRB_STATUS_SUCCESS);
-                    return TRUE;
+                    ret = TRUE;
+                    break;
                 case VioscsiResetDoNothing:
                     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Doing nothing with all pending SRBs\n");
                     SRB_SET_SRB_STATUS(Srb, SRB_STATUS_SUCCESS);
-                    return TRUE;
+                    ret = TRUE;
+                    break;
                 case VioscsiResetBugCheck:
                     RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Let's bugcheck due to this reset event\n");
                     KeBugCheckEx(0xDEADDEAD, (ULONG_PTR)Srb, SRB_PATH_ID(Srb), SRB_TARGET_ID(Srb), SRB_LUN(Srb));
-                    return TRUE;
+                    ret = TRUE;
+                    break;
             }
         case SRB_FUNCTION_WMI:
             VioScsiWmiSrb(DeviceExtension, Srb);
-            return TRUE;
+            ret = TRUE;
+            break;
         case SRB_FUNCTION_IO_CONTROL:
             VioScsiIoControl(DeviceExtension, Srb);
-            return TRUE;
+            ret = TRUE;
+            break;
     }
+
 EXIT_FN_SRB();
-    return FALSE;
+    return ret;
 }
 
 VOID
@@ -1758,11 +1804,11 @@ CompleteRequest(
 
  ENTER_FN_SRB();
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    srbExt = SRB_EXTENSION(Srb);
     PostProcessRequest(DeviceExtension, Srb);
 
     if (adaptExt->resp_time)
     {
-        srbExt = SRB_EXTENSION(Srb);
         if (srbExt->time != 0)
         {
             LARGE_INTEGER counter = { 0 };
@@ -1791,6 +1837,12 @@ CompleteRequest(
             }
         }
     }
+
+    if (srbExt->cmd != adaptExt->tmf_cmd.SrbExtension->cmd) {
+        CmdTableClearSrb(&adaptExt->Cmdtable, srbExt->cmd);
+        CmdTableDereferenceItem(&adaptExt->Cmdtable, srbExt->cmd);
+    }
+
     StorPortNotification(RequestComplete,
                          DeviceExtension,
                          Srb);

@@ -39,6 +39,7 @@
 #include "virtio_pci.h"
 #include "virtio.h"
 #include "virtio_ring.h"
+#include "cmd-table.h"
 
 typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
@@ -246,7 +247,7 @@ typedef struct _SRB_EXTENSION {
     ULONG                 out;
     ULONG                 in;
     ULONG                 Xfer;
-    VirtIOSCSICmd         cmd;
+    PVirtIOSCSICmd         cmd;
     PVIO_SG POINTER_ALIGN psgl;
     PVRING_DESC_ALIAS POINTER_ALIGN pdesc;
     VIO_SG                vio_sg[VIRTIO_MAX_SG];
@@ -339,6 +340,7 @@ typedef struct _ADAPTER_EXTENSION {
     ULONGLONG             fw_ver;
     ULONG                 resp_time;
     BOOLEAN               bRemoved;
+    CMD_TABLE             Cmdtable;
 } ADAPTER_EXTENSION, * PADAPTER_EXTENSION;
 
 #ifndef PCIX_TABLE_POINTER
