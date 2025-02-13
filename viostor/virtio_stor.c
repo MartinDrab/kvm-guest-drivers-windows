@@ -311,6 +311,49 @@ static ULONG InitVirtIODevice(PVOID DeviceExtension)
     return SP_RETURN_FOUND;
 }
 
+BOOLEAN VirtioReadRegistryParameter(
+    IN PVOID DeviceExtension,
+    IN PUCHAR ValueName,
+    IN LONG offset
+)
+{
+    BOOLEAN Ret = FALSE;
+    ULONG Len = sizeof(ULONG);
+    UCHAR* pBuf = NULL;
+    PADAPTER_EXTENSION adaptExt;
+
+
+    adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+    pBuf = StorPortAllocateRegistryBuffer(DeviceExtension, &Len);
+    if (pBuf == NULL) {
+        RhelDbgPrint(TRACE_LEVEL_FATAL, "StorPortAllocateRegistryBuffer failed to allocate buffer\n");
+        return FALSE;
+    }
+
+    memset(pBuf, 0, sizeof(ULONG));
+
+    Ret = StorPortRegistryRead(DeviceExtension,
+        ValueName,
+        1,
+        MINIPORT_REG_DWORD,
+        pBuf,
+        &Len);
+
+    if ((Ret == FALSE) || (Len == 0)) {
+        RhelDbgPrint(TRACE_LEVEL_FATAL, "StorPortRegistryRead returned 0x%x, Len = %d\n", Ret, Len);
+        StorPortFreeRegistryBuffer(DeviceExtension, pBuf);
+        return FALSE;
+    }
+
+    StorPortCopyMemory((PVOID)((UINT_PTR)adaptExt + offset),
+        (PVOID)pBuf,
+        sizeof(ULONG));
+
+    StorPortFreeRegistryBuffer(DeviceExtension, pBuf);
+
+    return TRUE;
+}
+
 ULONG
 VirtIoFindAdapter(
     IN PVOID DeviceExtension,
@@ -348,6 +391,9 @@ VirtIoFindAdapter(
     adaptExt->system_io_bus_number = ConfigInfo->SystemIoBusNumber;
     adaptExt->slot_number = ConfigInfo->SlotNumber;
     adaptExt->dump_mode  = IsCrashDumpMode;
+
+    adaptExt->action_on_reset = VirtioResetCompleteRequests;
+    VirtioReadRegistryParameter(DeviceExtension, REGISTRY_ACTION_ON_RESET, FIELD_OFFSET(ADAPTER_EXTENSION, action_on_reset));
 
     ConfigInfo->Master                 = TRUE;
     ConfigInfo->ScatterGather          = TRUE;
@@ -969,7 +1015,22 @@ VirtIoStartIo(
         case SRB_FUNCTION_RESET_BUS:
         case SRB_FUNCTION_RESET_DEVICE:
         case SRB_FUNCTION_RESET_LOGICAL_UNIT: {
-            CompletePendingRequests(DeviceExtension);
+            switch (adaptExt->action_on_reset) {
+                case VirtioResetCompleteRequests:
+                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Completing all pending SRBs\n");
+                    CompletePendingRequests(DeviceExtension);
+                    SRB_SET_SRB_STATUS(Srb, SRB_STATUS_SUCCESS);
+                    break;
+                case VirtioResetDoNothing:
+                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Doing nothing with all pending SRBs\n");
+                    SRB_SET_SRB_STATUS(Srb, SRB_STATUS_SUCCESS);
+                    break;
+                case VirtioResetBugCheck:
+                    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Let's bugcheck due to this reset event\n");
+                    KeBugCheckEx(0xDEADDEAD, (ULONG_PTR)Srb, SRB_PATH_ID(Srb), SRB_TARGET_ID(Srb), SRB_LUN(Srb));
+                    break;
+            }
+
             CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_SUCCESS);
 #ifdef DBG
             RhelDbgPrint(TRACE_LEVEL_INFORMATION, " RESET (%p) Function %x Cnt %d InQueue %d\n",
@@ -1156,7 +1217,18 @@ VirtIoResetBus(
     PADAPTER_EXTENSION  adaptExt;
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
-    CompletePendingRequests(DeviceExtension);
+    switch (adaptExt->action_on_reset) {
+        case VirtioResetDoNothing:
+            break;
+        case VirtioResetCompleteRequests:
+            CompletePendingRequests(DeviceExtension);
+            break;
+        case VirtioResetBugCheck:
+            RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Let's bugcheck due to this reset event\n");
+            KeBugCheckEx(0xDEADDEAD, 0, 0, 0, 0);
+            break;
+    }
+
     return TRUE;
 }
 
