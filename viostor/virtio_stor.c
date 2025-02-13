@@ -94,6 +94,11 @@ VirtIoStartIo(
     IN PSCSI_REQUEST_BLOCK Srb
     );
 
+VOID
+VirtioFreeResources(
+    IN PVOID DeviceExtension
+    );  
+
 ULONG
 VirtIoFindAdapter(
     IN PVOID DeviceExtension,
@@ -339,6 +344,7 @@ VirtIoFindAdapter(
 
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
+    VbrTableInit(&adaptExt->vbr_table, adaptExt);
     adaptExt->system_io_bus_number = ConfigInfo->SystemIoBusNumber;
     adaptExt->slot_number = ConfigInfo->SlotNumber;
     adaptExt->dump_mode  = IsCrashDumpMode;
@@ -1295,6 +1301,20 @@ VirtIoBuildIo(
 
     RtlZeroMemory(srbExt, sizeof(*srbExt));
 
+    if (VbrTableAllocItem(&adaptExt->vbr_table, &srbExt->vbr) != STOR_STATUS_SUCCESS) {
+        RhelDbgPrint(TRACE_LEVEL_ERROR, " Unable to allocate VBR for Srb 0x%p\n", Srb);
+        CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+        return FALSE;
+    }
+
+    if (VbrTableInsert(&adaptExt->vbr_table, srbExt->vbr) != STOR_STATUS_SUCCESS) {
+        RhelDbgPrint(TRACE_LEVEL_ERROR, " Unable to insert VBR 0x%p for Srb 0x%p\n", srbExt->vbr, Srb);
+        VbrTableDereferenceItem(&adaptExt->vbr_table, srbExt->vbr);
+        srbExt->vbr = NULL;
+        CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_INSUFFICIENT_RESOURCES);
+        return FALSE;
+    }
+
     if (SRB_FUNCTION(Srb) != SRB_FUNCTION_EXECUTE_SCSI )
     {
         RhelDbgPrint(TRACE_LEVEL_INFORMATION, " Srb = 0x%p Function = 0x%x\n", Srb, SRB_FUNCTION(Srb));
@@ -1381,26 +1401,26 @@ VirtIoBuildIo(
         }
     }
 
-    srbExt->vbr.out_hdr.sector = lba;
-    srbExt->vbr.out_hdr.ioprio = 0;
-    srbExt->vbr.req            = (PVOID)Srb;
+    srbExt->vbr->out_hdr.sector = lba;
+    srbExt->vbr->out_hdr.ioprio = 0;
+    srbExt->vbr->req            = (PVOID)Srb;
     srbExt->fua                = CHECKBIT(adaptExt->features, VIRTIO_BLK_F_FLUSH) ? (cdb->CDB10.ForceUnitAccess == 1) : FALSE;
 
     if (SRB_FLAGS(Srb) & SRB_FLAGS_DATA_OUT) {
-        srbExt->vbr.out_hdr.type = VIRTIO_BLK_T_OUT;
+        srbExt->vbr->out_hdr.type = VIRTIO_BLK_T_OUT;
         srbExt->out = sgElement;
         srbExt->in = 1;
     } else {
-        srbExt->vbr.out_hdr.type = VIRTIO_BLK_T_IN;
+        srbExt->vbr->out_hdr.type = VIRTIO_BLK_T_IN;
         srbExt->out = 1;
         srbExt->in = sgElement;
     }
 
-    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.out_hdr, &dummy);
-    srbExt->sg[0].length = sizeof(srbExt->vbr.out_hdr);
+    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->out_hdr, &dummy);
+    srbExt->sg[0].length = sizeof(srbExt->vbr->out_hdr);
 
-    srbExt->sg[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.status, &dummy);
-    srbExt->sg[sgElement].length = sizeof(srbExt->vbr.status);
+    srbExt->sg[sgElement].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->status, &dummy);
+    srbExt->sg[sgElement].length = sizeof(srbExt->vbr->status);
 
     return TRUE;
 }
@@ -1856,9 +1876,19 @@ CompleteSRB(
     )
 {
     PADAPTER_EXTENSION adaptExt= (PADAPTER_EXTENSION)DeviceExtension;
+    PSRB_EXTENSION srbExt = SRB_EXTENSION(Srb);
 #ifdef DBG
     InterlockedDecrement((LONG volatile*)&adaptExt->srb_cnt);
 #endif
+    if (srbExt->vbr != NULL && srbExt->vbr != &adaptExt->vbr) {
+        VbrTableClearSrb(&adaptExt->vbr_table, srbExt->vbr);
+        VbrTableDereferenceItem(&adaptExt->vbr_table, srbExt->vbr);
+        if (!srbExt->sent) {
+            VbrTableDelete(&adaptExt->vbr_table, srbExt->vbr);
+            VbrTableDereferenceItem(&adaptExt->vbr_table, srbExt->vbr);
+        }
+    }
+
     StorPortNotification(RequestComplete,
                          DeviceExtension,
                          Srb);
@@ -2047,6 +2077,20 @@ VioStorCompleteRequest(
         while ((vbr = (pblk_req)virtqueue_get_buf(vq, &len)) != NULL) {
             PLIST_ENTRY le = NULL;
             BOOLEAN bFound = FALSE;
+            BOOLEAN reused = FALSE;
+            
+            if (!VbrTableExists(&adaptExt->vbr_table, vbr)) {
+                RhelDbgPrint(TRACE_LEVEL_WARNING, " VBR 0x%p does not exist\n", vbr);
+                continue;
+            }
+            
+            if (vbr->req == NULL) {
+                RhelDbgPrint(TRACE_LEVEL_WARNING, " VBR 0x%p has NULL Srb\n", vbr);
+                VbrTableDelete(&adaptExt->vbr_table, vbr);
+                VbrTableDereferenceItem(&adaptExt->vbr_table, vbr);
+                continue;
+            }
+
             Srb = (PSTORAGE_REQUEST_BLOCK)vbr->req;
 #ifdef DBG
             InterlockedDecrement((LONG volatile*)&adaptExt->inqueue_cnt);
@@ -2104,6 +2148,9 @@ VioStorCompleteRequest(
                         CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_SUCCESS);
                     }
                 }
+
+                VbrTableDelete(&adaptExt->vbr_table, vbr);
+                VbrTableDereferenceItem(&adaptExt->vbr_table, vbr);
                 continue;
             }
             if (bFound && Srb) {
@@ -2113,9 +2160,10 @@ VioStorCompleteRequest(
                     Srb, QueueNumber, MessageID);
                 if (srbExt && srbExt->fua == TRUE) {
                     SRB_SET_SRB_STATUS(Srb, SRB_STATUS_PENDING);
-                    if (!RhelDoFlush(DeviceExtension, Srb, TRUE, bIsr)) {
+                    reused = RhelDoFlush(DeviceExtension, Srb, TRUE, bIsr);
+                    if (!reused)
                         CompleteRequestWithStatus(DeviceExtension, (PSRB_TYPE)Srb, SRB_STATUS_ERROR);
-                    }
+
                     srbExt->fua = FALSE;
                 }
                 else {
@@ -2123,6 +2171,10 @@ VioStorCompleteRequest(
                 }
             }
 
+            if (!reused) {
+                VbrTableDelete(&adaptExt->vbr_table, vbr);
+                VbrTableDereferenceItem(&adaptExt->vbr_table, vbr);
+            }
         }
     } while (!virtqueue_enable_cb(vq));
 

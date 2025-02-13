@@ -105,17 +105,17 @@ RhelDoFlush(
 
     srbExt->MessageID = MessageId;
 
-    srbExt->vbr.out_hdr.sector = 0;
-    srbExt->vbr.out_hdr.ioprio = 0;
-    srbExt->vbr.req            = (struct request *)Srb;
-    srbExt->vbr.out_hdr.type   = VIRTIO_BLK_T_FLUSH;
+    srbExt->vbr->out_hdr.sector = 0;
+    srbExt->vbr->out_hdr.ioprio = 0;
+    srbExt->vbr->req            = (struct request *)Srb;
+    srbExt->vbr->out_hdr.type   = VIRTIO_BLK_T_FLUSH;
     srbExt->out                = 1;
     srbExt->in                 = 1;
 
-    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.out_hdr, &fragLen);
-    srbExt->sg[0].length   = sizeof(srbExt->vbr.out_hdr);
-    srbExt->sg[1].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.status, &fragLen);
-    srbExt->sg[1].length   = sizeof(srbExt->vbr.status);
+    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->out_hdr, &fragLen);
+    srbExt->sg[0].length   = sizeof(srbExt->vbr->out_hdr);
+    srbExt->sg[1].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->status, &fragLen);
+    srbExt->sg[1].length   = sizeof(srbExt->vbr->status);
 
     element = &adaptExt->processing_srbs[QueueNumber];
     if (!resend) {
@@ -124,12 +124,13 @@ RhelDoFlush(
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              srbExt->vbr, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
         element = &adaptExt->processing_srbs[QueueNumber];
-        InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
+        srbExt->sent = TRUE;
+        InsertTailList(&element->srb_list, &srbExt->vbr->list_entry);
         element->srb_cnt++;
     } else {
         RhelDbgPrint(TRACE_LEVEL_ERROR, " Can not add packet to queue %d.\n", QueueNumber);
@@ -197,12 +198,13 @@ RhelDoReadWrite(PVOID DeviceExtension,
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              srbExt->vbr, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
         element = &adaptExt->processing_srbs[QueueNumber];
-        InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
+        srbExt->sent = TRUE;
+        InsertTailList(&element->srb_list, &srbExt->vbr->list_entry);
         element->srb_cnt++;
     } else {
         RhelDbgPrint(TRACE_LEVEL_ERROR, " Can not add packet to queue %d.\n", QueueNumber);
@@ -290,19 +292,19 @@ RhelDoUnMap(
         adaptExt->blk_discard[i].flags = 0;
     }
 
-    srbExt->vbr.out_hdr.sector = 0;
-    srbExt->vbr.out_hdr.ioprio = 0;
-    srbExt->vbr.req            = (struct request *)Srb;
-    srbExt->vbr.out_hdr.type   = VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_OUT;
+    srbExt->vbr->out_hdr.sector = 0;
+    srbExt->vbr->out_hdr.ioprio = 0;
+    srbExt->vbr->req            = (struct request *)Srb;
+    srbExt->vbr->out_hdr.type   = VIRTIO_BLK_T_DISCARD | VIRTIO_BLK_T_OUT;
     srbExt->out                = 2;
     srbExt->in                 = 1;
 
-    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.out_hdr, &fragLen);
-    srbExt->sg[0].length   = sizeof(srbExt->vbr.out_hdr);
+    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->out_hdr, &fragLen);
+    srbExt->sg[0].length   = sizeof(srbExt->vbr->out_hdr);
     srbExt->sg[1].physAddr = MmGetPhysicalAddress(&adaptExt->blk_discard[0]);
     srbExt->sg[1].length   = sizeof(blk_discard_write_zeroes) * BlockDescrCount;
-    srbExt->sg[2].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.status, &fragLen);
-    srbExt->sg[2].length   = sizeof(srbExt->vbr.status);
+    srbExt->sg[2].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->status, &fragLen);
+    srbExt->sg[2].length   = sizeof(srbExt->vbr->status);
 
     if (adaptExt->num_queues > 1) {
         STARTIO_PERFORMANCE_PARAMETERS param;
@@ -325,18 +327,19 @@ RhelDoUnMap(
     }
 
     srbExt->MessageID = MessageId;
-    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " QueueNumber 0x%x vq = %p type = %d\n", QueueNumber, adaptExt->vq[QueueNumber], srbExt->vbr.out_hdr.type);
+    RhelDbgPrint(TRACE_LEVEL_INFORMATION, " QueueNumber 0x%x vq = %p type = %d\n", QueueNumber, adaptExt->vq[QueueNumber], srbExt->vbr->out_hdr.type);
 
     VioStorVQLock(DeviceExtension, MessageId, &LockHandle, FALSE);
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              srbExt->vbr, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
         element = &adaptExt->processing_srbs[QueueNumber];
-        InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
+        srbExt->sent = TRUE;
+        InsertTailList(&element->srb_list, &srbExt->vbr->list_entry);
         element->srb_cnt++;
     } else {
         RhelDbgPrint(TRACE_LEVEL_ERROR, " Can not add packet to queue %d.\n", QueueNumber);
@@ -400,30 +403,31 @@ RhelGetSerialNumber(
 
     srbExt->MessageID = MessageId;
 
-    srbExt->vbr.out_hdr.sector = 0;
-    srbExt->vbr.out_hdr.ioprio = 0;
-    srbExt->vbr.req            = (struct request *)Srb;
-    srbExt->vbr.out_hdr.type   = VIRTIO_BLK_T_GET_ID | VIRTIO_BLK_T_IN;
+    srbExt->vbr->out_hdr.sector = 0;
+    srbExt->vbr->out_hdr.ioprio = 0;
+    srbExt->vbr->req            = (struct request *)Srb;
+    srbExt->vbr->out_hdr.type   = VIRTIO_BLK_T_GET_ID | VIRTIO_BLK_T_IN;
     srbExt->out                = 1;
     srbExt->in                 = 2;
 
-    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.out_hdr, &fragLen);
-    srbExt->sg[0].length   = sizeof(srbExt->vbr.out_hdr);
+    srbExt->sg[0].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->out_hdr, &fragLen);
+    srbExt->sg[0].length   = sizeof(srbExt->vbr->out_hdr);
     srbExt->sg[1].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &adaptExt->sn[0], &fragLen);
     srbExt->sg[1].length   = sizeof(adaptExt->sn);
-    srbExt->sg[2].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr.status, &fragLen);
-    srbExt->sg[2].length   = sizeof(srbExt->vbr.status);
+    srbExt->sg[2].physAddr = StorPortGetPhysicalAddress(DeviceExtension, NULL, &srbExt->vbr->status, &fragLen);
+    srbExt->sg[2].length   = sizeof(srbExt->vbr->status);
 
     VioStorVQLock(DeviceExtension, MessageId, &LockHandle, FALSE);
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              srbExt->vbr, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
         element = &adaptExt->processing_srbs[QueueNumber];
-        InsertTailList(&element->srb_list, &srbExt->vbr.list_entry);
+        srbExt->sent = TRUE;
+        InsertTailList(&element->srb_list, &srbExt->vbr->list_entry);
         element->srb_cnt++;
     } else {
         RhelDbgPrint(TRACE_LEVEL_ERROR, " Can not add packet to queue %d.\n", QueueNumber);
@@ -455,6 +459,7 @@ RhelShutDown(
         adaptExt->vq[index] = NULL;
     }
     virtio_device_shutdown(&adaptExt->vdev);
+    VbrTableFinit(&adaptExt->vbr_table);
 }
 
 ULONGLONG

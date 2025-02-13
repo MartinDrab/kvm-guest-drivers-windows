@@ -41,6 +41,7 @@
 #include "virtio_ring.h"
 #include "virtio_stor_utils.h"
 #include "virtio_stor_hw_helper.h"
+#include "vbr-table.h"
 
 typedef struct VirtIOBufferDescriptor VIO_SG, *PVIO_SG;
 
@@ -247,6 +248,7 @@ typedef struct _ADAPTER_EXTENSION {
     REQUEST_LIST          processing_srbs[MAX_CPU];
     BOOLEAN               reset_in_progress;
     ULONGLONG             fw_ver;
+    VBR_TABLE             vbr_table;
 #ifdef DBG
     LONG                  srb_cnt;
     LONG                  inqueue_cnt;
@@ -263,7 +265,8 @@ typedef struct _VRING_DESC_ALIAS
 }VRING_DESC_ALIAS;
 
 typedef struct _SRB_EXTENSION {
-    blk_req               vbr;
+    blk_req               *vbr;
+    BOOLEAN               sent;
     ULONG                 out;
     ULONG                 in;
     ULONG                 MessageID;
