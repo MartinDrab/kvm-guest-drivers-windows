@@ -382,6 +382,7 @@ VirtIoFindAdapter(
 
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
 
+    adaptExt->last_srb_id = 1;
     adaptExt->system_io_bus_number = ConfigInfo->SystemIoBusNumber;
     adaptExt->slot_number = ConfigInfo->SlotNumber;
     adaptExt->dump_mode  = IsCrashDumpMode;
@@ -945,9 +946,16 @@ VirtIoStartIo(
 {
     PCDB cdb = SRB_CDB(Srb);
     PADAPTER_EXTENSION adaptExt;
+    PSRB_EXTENSION srbExt;
     UCHAR ScsiStatus = SCSISTAT_GOOD;
 
     adaptExt = (PADAPTER_EXTENSION)DeviceExtension;
+   srbExt = SRB_EXTENSION(Srb);
+   srbExt->id = adaptExt->last_srb_id;
+   adaptExt->last_srb_id++;
+   if (adaptExt->last_srb_id == 0)
+       adaptExt->last_srb_id++;
+
     SRB_SET_SCSI_STATUS(((PSRB_TYPE)Srb), ScsiStatus);
 
     RhelDbgPrint(TRACE_LEVEL_VERBOSE, " Srb = 0x%p\n", Srb);
@@ -2100,7 +2108,7 @@ VioStorCompleteRequest(
     ULONG               QueueNumber = MessageID - 1;
     STOR_LOCK_HANDLE    queueLock = { 0 };
     struct virtqueue    *vq = NULL;
-    pblk_req            vbr = NULL;
+    ULONG_PTR           srbId = 0;
     PSRB_TYPE           Srb = NULL;
     PSRB_EXTENSION      srbExt = NULL;
     UCHAR               srbStatus = SRB_STATUS_SUCCESS;
@@ -2116,10 +2124,9 @@ VioStorCompleteRequest(
     VioStorVQLock(DeviceExtension, MessageID, &queueLock, bIsr);
     do {
         virtqueue_disable_cb(vq);
-        while ((vbr = (pblk_req)virtqueue_get_buf(vq, &len)) != NULL) {
+        while ((srbId = (ULONG_PTR)virtqueue_get_buf(vq, &len)) != 0) {
             PLIST_ENTRY le = NULL;
             BOOLEAN bFound = FALSE;
-            Srb = (PSTORAGE_REQUEST_BLOCK)vbr->req;
 #ifdef DBG
             InterlockedDecrement((LONG volatile*)&adaptExt->inqueue_cnt);
 #endif
@@ -2127,21 +2134,21 @@ VioStorCompleteRequest(
             {
                 pblk_req req = CONTAINING_RECORD(le, blk_req, list_entry);
 
-                if (Srb) {
-                    srbExt = SRB_EXTENSION(Srb);
-                    PSTORAGE_REQUEST_BLOCK  currSrb = (PSTORAGE_REQUEST_BLOCK)req->req;
-                    PSRB_EXTENSION currSrbExt = SRB_EXTENSION(currSrb);
-                    if (currSrbExt == srbExt && (PSRB_TYPE)currSrb == Srb)
-                    {
-                        RemoveEntryList(le);
-                        element->srb_cnt--;
-                        bFound = TRUE;
-                        break;
-                    }
+                Srb = (PSRB_TYPE)req->req;
+                srbExt = SRB_EXTENSION(Srb);
+                if (srbExt->id == srbId) {
+                    RemoveEntryList(le);
+                    element->srb_cnt--;
+                    bFound = TRUE;
+                    break;
                 }
             }
 
-            if (bFound && vbr->out_hdr.type == VIRTIO_BLK_T_GET_ID) {
+            if (!bFound) {
+                RhelDbgPrint(TRACE_LEVEL_WARNING, " No Srb to complete for ID 0x%p\n", (void *)srbId);
+            }
+
+            if (bFound && srbExt->vbr.out_hdr.type == VIRTIO_BLK_T_GET_ID) {
                 adaptExt->sn_ok = TRUE;
                 if (Srb) {
                     PCDB cdb = SRB_CDB(Srb);
@@ -2180,7 +2187,7 @@ VioStorCompleteRequest(
             }
             if (bFound && Srb) {
                 srbExt = SRB_EXTENSION(Srb);
-                srbStatus = DeviceToSrbStatus(vbr->status);
+                srbStatus = DeviceToSrbStatus(srbExt->vbr.status);
                 RhelDbgPrint(TRACE_LEVEL_INFORMATION, " srb %p, QueueNumber %lu, MessageId %lu.\n",
                     Srb, QueueNumber, MessageID);
                 if (srbExt && srbExt->fua == TRUE) {

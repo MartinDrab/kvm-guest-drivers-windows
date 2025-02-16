@@ -256,6 +256,7 @@ typedef struct _ADAPTER_EXTENSION {
     BOOLEAN               reset_in_progress;
     ULONGLONG             fw_ver;
     ACTION_ON_RESET       action_on_reset;
+    ULONG_PTR             last_srb_id;
 #ifdef DBG
     LONG                  srb_cnt;
     LONG                  inqueue_cnt;
@@ -277,6 +278,7 @@ typedef struct _SRB_EXTENSION {
     ULONG                 in;
     ULONG                 MessageID;
     BOOLEAN               fua;
+    ULONG_PTR             id;
     VIO_SG                sg[VIRTIO_MAX_SG];
     VRING_DESC_ALIAS      desc[VIRTIO_MAX_SG];
 }SRB_EXTENSION, *PSRB_EXTENSION;

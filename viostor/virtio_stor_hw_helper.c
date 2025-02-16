@@ -124,7 +124,7 @@ RhelDoFlush(
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              (void *)srbExt->id, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
@@ -197,7 +197,7 @@ RhelDoReadWrite(PVOID DeviceExtension,
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              (void *)srbExt->id, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
@@ -331,7 +331,7 @@ RhelDoUnMap(
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              (void *)srbExt->id, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
@@ -418,7 +418,7 @@ RhelGetSerialNumber(
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               &srbExt->sg[0],
                                               srbExt->out, srbExt->in,
-                                              &srbExt->vbr, va, pa);
+                                              (void *)srbExt->id, va, pa);
     
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
