@@ -109,7 +109,7 @@ ENTER_FN_SRB();
     add_buffer_req_status = virtqueue_add_buf(adaptExt->vq[QueueNumber],
                                               srbExt->psgl,
                                               srbExt->out, srbExt->in,
-                                              &srbExt->cmd, va, pa);
+                                              (void *)srbExt->id, va, pa);
 
     if (add_buffer_req_status == VQ_ADD_BUFFER_SUCCESS) {
         notify = virtqueue_kick_prepare(adaptExt->vq[QueueNumber]);
