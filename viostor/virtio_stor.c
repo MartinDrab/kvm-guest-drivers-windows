@@ -2136,6 +2136,11 @@ VioStorCompleteRequest(
 
                 Srb = (PSRB_TYPE)req->req;
                 srbExt = SRB_EXTENSION(Srb);
+                // Only SRBs with existing (i.e. non-NULL) extension
+                 // are inserted into our queues, thus, we may help
+                 // the Code Analysis and provide it with this information
+                 // in order to avoid false-positive warnings.
+                _Analysis_assume_(srbExt != NULL);
                 if (srbExt->id == srbId) {
                     RemoveEntryList(le);
                     element->srb_cnt--;
